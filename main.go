@@ -58,7 +58,7 @@ func (s *Service) Work(ctx context.Context, id int) error {
 	for {
 		paymentID, err := s.rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 0).Result()
 		if err != nil {
-			continue
+			return err
 		}
 		slog.Info("working", "payment id", paymentID, "workerid", id)
 		s.UpdatePaymentStatus(ctx, paymentID, "processing")
@@ -97,7 +97,7 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			continue
 		}
 
-		backoff := 10 * time.Second
+		backoff := 20 * time.Second
 		retryAt := time.Now().Add(backoff).Unix()
 
 		s.rdb.ZAdd(ctx, "delayed_queue", redis.Z{
@@ -124,8 +124,12 @@ func (s *Service) RetryWorker(ctx context.Context) {
 			Count:   1,
 		}).Result()
 		if len(jobs) == 0 {
-			time.Sleep(1 * time.Second)
-			continue
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(1 * time.Second):
+				continue
+			}
 		}
 		slog.Info("retrying: ", "id", jobs[0].Member)
 		now := float64(time.Now().Unix())
@@ -133,7 +137,6 @@ func (s *Service) RetryWorker(ctx context.Context) {
 			time.Sleep(time.Duration(jobs[0].Score-now) * time.Second)
 			continue
 		}
-		time.Sleep(time.Duration(jobs[0].Score))
 
 		s.rdb.LPush(ctx, "main_queue", jobs[0].Member)
 		s.rdb.ZRem(ctx, "delayed_queue", jobs[0].Member)
