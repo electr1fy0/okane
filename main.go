@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
+	"os"
 	"os/signal"
 	"syscall"
 	"time"
@@ -39,13 +41,47 @@ type Service struct {
 	rdb *redis.Client
 }
 
+func (s *Service) Worker(ctx context.Context) {
+	for {
+		paymentID, err := s.rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 0).Result()
+		if err != nil {
+			continue
+		}
+		payment, err := s.GetPaymentByID(ctx, paymentID)
+		fmt.Println("payment before processing:", payment)
+		process(paymentID)
+		s.UpdatePaymentStatus(ctx, paymentID, "processing")
+		updatedPayment, err := s.GetPaymentByID(ctx, paymentID)
+		fmt.Println("payment after processing:", updatedPayment)
+	}
+}
+
+func (s *Service) UpdatePaymentStatus(ctx context.Context, id string, status string) error {
+	query := `
+		update payments set status = $1 where id = $2`
+
+	_, err := s.db.Exec(ctx, query, status, id)
+
+	return err
+}
+
+func (s *Service) GetPaymentByID(ctx context.Context, id string) (Payment, error) {
+	query := `
+	select id, amount, status, idempotency_key, created_at from payments where id = $1;
+	`
+	payment := Payment{}
+
+	err := s.db.QueryRow(ctx, query, id).Scan(&payment.ID, &payment.Amount, &payment.Status, &payment.IdempotencyKey, &payment.CreatedAt)
+	return payment, err
+
+}
+
 func (s *Service) CreatePayment(ctx context.Context, params CreatePaymentParams) (*Payment, error) {
 	query := `
 		insert into payments (id, amount, status, idempotency_key)
 		values ($1, $2, $3, $4)
 		returning id, amount, status, idempotency_key, created_at, updated_at;
 	`
-
 	payment := &Payment{}
 	err := s.db.QueryRow(ctx, query,
 		uuid.New(),
@@ -104,6 +140,8 @@ func process(paymentId string) {
 }
 
 func main() {
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
 	r := http.NewServeMux()
@@ -147,15 +185,7 @@ func main() {
 		}
 	}()
 
-	go func() {
-		for {
-			res, err := rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 0).Result()
-			if err != nil {
-				continue
-			}
-			process(res)
-		}
-	}()
+	go svc.Worker(ctx)
 	<-ctx.Done()
 	stop()
 	shutDownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -164,7 +194,5 @@ func main() {
 	if err != nil {
 		log.Println("failed to wait for ongoing reqs to finish")
 	}
-
 	log.Println("server shut down")
-
 }
