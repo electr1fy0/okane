@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -56,8 +57,14 @@ func (s *Service) Start(ctx context.Context) error {
 
 func (s *Service) Work(ctx context.Context, id int) error {
 	for {
-		paymentID, err := s.rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 0).Result()
+		paymentID, err := s.rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 2*time.Second).Result()
 		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			if err == redis.Nil {
+				continue
+			}
 			return err
 		}
 		slog.Info("working", "payment id", paymentID, "workerid", id)
@@ -101,7 +108,7 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			continue
 		}
 
-		backoff := 20 * time.Second
+		backoff := 10 * time.Second
 		retryAt := time.Now().Add(backoff).Unix()
 
 		s.rdb.ZAdd(ctx, "delayed_queue", redis.Z{
@@ -116,20 +123,28 @@ type ProviderClient struct {
 	http    *http.Client
 }
 
-func (s *Service) RetryWorker(ctx context.Context) {
+func (s *Service) RetryWorker(ctx context.Context) error {
 	for {
-		jobs, _ := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
+		jobs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
 			Key:     "delayed_queue",
 			ByScore: true,
 			Start:   "-inf",
 			Stop:    "+inf",
-			Offset:  0,
-			Count:   1,
+
+			Offset: 0,
+			Count:  1,
 		}).Result()
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+
+			return err
+		}
 		if len(jobs) == 0 {
 			select {
 			case <-ctx.Done():
-				return
+				return err
 			case <-time.After(1 * time.Second):
 				continue
 			}
@@ -141,7 +156,7 @@ func (s *Service) RetryWorker(ctx context.Context) {
 			case <-time.After(time.Duration(jobs[0].Score-now) * time.Second):
 				continue
 			case <-ctx.Done():
-				return
+				return err
 			}
 		}
 
@@ -229,25 +244,22 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	// w.Write([]byte("meow"))
 }
 
-func process(paymentId string) {
-	slog.Info("processing: ", "paymentId", paymentId)
-}
-
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
 
 	providerClient := ProviderClient{
 		baseURL: "http://localhost:3000",
 		http:    &http.Client{},
 	}
 
-	g, ctx := errgroup.WithContext(ctx)
+	g, workerCtx := errgroup.WithContext(sigCtx)
 
 	r := http.NewServeMux()
-	dbPool, err := pgxpool.New(ctx, "postgresql://ayush:ayush@localhost:5432/okanedb")
+	dbPool, err := pgxpool.New(sigCtx, "postgresql://ayush:ayush@localhost:5432/okanedb")
 	if err != nil {
 		log.Fatalln("failed to connect to db", err)
 	}
@@ -275,7 +287,7 @@ func main() {
 		Addr:    ":8080",
 		Handler: r,
 		BaseContext: func(_ net.Listener) context.Context {
-			return ctx
+			return sigCtx
 		},
 		ReadTimeout:  5 * time.Second,
 		WriteTimeout: 10 * time.Second,
@@ -290,22 +302,25 @@ func main() {
 		return nil
 	})
 
-	g.Go(func() error { return svc.Start(ctx) })
+	g.Go(func() error { return svc.Start(workerCtx) })
 
 	g.Go(func() error {
-		svc.RetryWorker(ctx)
-		return nil
+		return svc.RetryWorker(workerCtx)
+	})
+
+	g.Go(func() error {
+		<-sigCtx.Done()
+		fmt.Print("sigctx done")
+		shutDownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+
+		err = server.Shutdown(shutDownCtx)
+		fmt.Println(err)
+		return err
 	})
 	if err := g.Wait(); err != nil {
-		slog.Error("critical failure", "error", err)
+		slog.Error("errgroup", "error", err)
 	}
-	<-ctx.Done()
-	stop()
-	shutDownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	err = server.Shutdown(shutDownCtx)
-	if err != nil {
-		slog.Warn("failed to wait for ongoing reqs to finish")
-	}
+
 	slog.Info("server shut down")
 }
