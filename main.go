@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -37,8 +36,14 @@ type CreatePaymentParams struct {
 }
 
 type Service struct {
-	db  *pgxpool.Pool
-	rdb *redis.Client
+	db             *pgxpool.Pool
+	rdb            *redis.Client
+	providerClient *ProviderClient
+}
+
+type ProviderClient struct {
+	baseURL string
+	http    *http.Client
 }
 
 func (s *Service) Worker(ctx context.Context) {
@@ -48,12 +53,32 @@ func (s *Service) Worker(ctx context.Context) {
 			continue
 		}
 		payment, err := s.GetPaymentByID(ctx, paymentID)
-		fmt.Println("payment before processing:", payment)
+		slog.Info("payment before processing:", "status", payment.Status)
 		process(paymentID)
 		s.UpdatePaymentStatus(ctx, paymentID, "processing")
 		updatedPayment, err := s.GetPaymentByID(ctx, paymentID)
-		fmt.Println("payment after processing:", updatedPayment)
+		slog.Info("payment during processing:", "status", updatedPayment.Status)
+
+		resp, err := s.providerClient.http.Get(s.providerClient.baseURL)
+		if err != nil {
+			slog.Error("failed to request payment provider", "error", err)
+			continue
+		}
+		switch resp.StatusCode {
+		case http.StatusOK:
+			slog.Info("payment succcess", "id", paymentID)
+			s.UpdatePaymentStatus(ctx, paymentID, "success")
+		case http.StatusServiceUnavailable:
+			slog.Info("service unavailable, should retry later")
+		case http.StatusUnprocessableEntity:
+			slog.Info("unprocessable payment, shouldn't retry this")
+		}
+
+		finalPayment, err := s.GetPaymentByID(ctx, paymentID)
+		slog.Info("payment after processing:", "status", finalPayment.Status)
+
 	}
+
 }
 
 func (s *Service) UpdatePaymentStatus(ctx context.Context, id string, status string) error {
@@ -136,14 +161,19 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 }
 
 func process(paymentId string) {
-	fmt.Println("processing: ", paymentId)
+	slog.Info("processing: ", "paymentId", paymentId)
 }
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 
+	providerClient := ProviderClient{
+		baseURL: "http://localhost:3000",
+		http:    &http.Client{},
+	}
 	r := http.NewServeMux()
 	dbPool, err := pgxpool.New(ctx, "postgresql://ayush:ayush@localhost:5432/okanedb")
 	if err != nil {
@@ -158,8 +188,9 @@ func main() {
 	})
 
 	svc := &Service{
-		db:  dbPool,
-		rdb: rdb,
+		db:             dbPool,
+		rdb:            rdb,
+		providerClient: &providerClient,
 	}
 
 	h := &APIHandler{
@@ -179,7 +210,7 @@ func main() {
 	}
 
 	go func() {
-		log.Println("starting server on :8080")
+		slog.Info("starting server on :8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			log.Fatalln("server crashed:", err)
 		}
@@ -192,7 +223,7 @@ func main() {
 	defer cancel()
 	err = server.Shutdown(shutDownCtx)
 	if err != nil {
-		log.Println("failed to wait for ongoing reqs to finish")
+		slog.Warn("failed to wait for ongoing reqs to finish")
 	}
-	log.Println("server shut down")
+	slog.Info("server shut down")
 }
