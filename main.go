@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/errgroup"
 )
 
 type Payment struct {
@@ -39,47 +40,27 @@ type Service struct {
 	db             *pgxpool.Pool
 	rdb            *redis.Client
 	providerClient *ProviderClient
+	workers        int
 }
 
-type ProviderClient struct {
-	baseURL string
-	http    *http.Client
-}
-
-func (s *Service) RetryWorker(ctx context.Context) {
-	for {
-		jobs, _ := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-			Key:     "delayed_queue",
-			ByScore: true,
-			Start:   "-inf",
-			Stop:    "+inf",
-			Offset:  0,
-			Count:   1,
-		}).Result()
-		if len(jobs) == 0 {
-			time.Sleep(1 * time.Second)
-			continue
-		}
-		slog.Info("retrying: ", "id", jobs[0].Member)
-		now := float64(time.Now().Unix())
-		if jobs[0].Score > now {
-			time.Sleep(time.Duration(jobs[0].Score-now) * time.Second)
-			continue
-		}
-		time.Sleep(time.Duration(jobs[0].Score))
-
-		s.rdb.LPush(ctx, "main_queue", jobs[0].Member)
-		s.rdb.ZRem(ctx, "delayed_queue", jobs[0].Member)
+func (s *Service) Start(ctx context.Context) {
+	g, ctx := errgroup.WithContext(ctx)
+	for i := range s.workers {
+		g.Go(func() error {
+			slog.Info("Starting worker", "id", i)
+			return s.Work(ctx, i)
+		})
 	}
+	g.Wait()
 }
 
-func (s *Service) MainWorker(ctx context.Context) {
+func (s *Service) Work(ctx context.Context, id int) error {
 	for {
 		paymentID, err := s.rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 0).Result()
 		if err != nil {
 			continue
 		}
-
+		slog.Info("working", "payment id", paymentID, "workerid", id)
 		s.UpdatePaymentStatus(ctx, paymentID, "processing")
 
 		maxImmediateRetries := 1
@@ -124,7 +105,39 @@ func (s *Service) MainWorker(ctx context.Context) {
 			Member: paymentID,
 		})
 	}
+	return nil
+}
 
+type ProviderClient struct {
+	baseURL string
+	http    *http.Client
+}
+
+func (s *Service) RetryWorker(ctx context.Context) {
+	for {
+		jobs, _ := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
+			Key:     "delayed_queue",
+			ByScore: true,
+			Start:   "-inf",
+			Stop:    "+inf",
+			Offset:  0,
+			Count:   1,
+		}).Result()
+		if len(jobs) == 0 {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		slog.Info("retrying: ", "id", jobs[0].Member)
+		now := float64(time.Now().Unix())
+		if jobs[0].Score > now {
+			time.Sleep(time.Duration(jobs[0].Score-now) * time.Second)
+			continue
+		}
+		time.Sleep(time.Duration(jobs[0].Score))
+
+		s.rdb.LPush(ctx, "main_queue", jobs[0].Member)
+		s.rdb.ZRem(ctx, "delayed_queue", jobs[0].Member)
+	}
 }
 
 func (s *Service) UpdatePaymentStatus(ctx context.Context, id string, status string) error {
@@ -237,6 +250,7 @@ func main() {
 		db:             dbPool,
 		rdb:            rdb,
 		providerClient: &providerClient,
+		workers:        5,
 	}
 
 	h := &APIHandler{
@@ -262,7 +276,7 @@ func main() {
 		}
 	}()
 
-	go svc.MainWorker(ctx)
+	go svc.Start(ctx)
 	go svc.RetryWorker(ctx)
 	<-ctx.Done()
 	stop()
