@@ -32,9 +32,9 @@ type Payment struct {
 }
 
 type CreatePaymentParams struct {
-	Amount         int64
-	Status         string
-	IdempotencyKey string
+	Amount         int64  `json:"amount"`
+	Status         string `json:"status"`
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 type Service struct {
@@ -225,15 +225,24 @@ func WriteJson(w http.ResponseWriter, data any, statusCode int) {
 func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
+	var recPayment Payment
+	err := json.NewDecoder(r.Body).Decode(&recPayment)
+	if err != nil {
+		http.Error(w, "failed to decode the payment", http.StatusBadRequest)
+		return
+	}
+
 	payment, err := h.svc.CreatePayment(ctx, CreatePaymentParams{
-		Amount:         100,
+		Amount:         recPayment.Amount,
 		Status:         "pending",
-		IdempotencyKey: uuid.NewString(),
+		IdempotencyKey: recPayment.IdempotencyKey,
 	})
+
 	if err != nil {
 		http.Error(w, "failed to create payment ", http.StatusInternalServerError)
 		return
 	}
+
 	err = h.svc.rdb.LPush(ctx, "main_queue", payment.ID.String()).Err()
 	if err != nil {
 		http.Error(w, "failed to push to redis"+err.Error(), http.StatusInternalServerError)
@@ -241,7 +250,21 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	WriteJson(w, payment, http.StatusAccepted)
-	// w.Write([]byte("meow"))
+}
+
+func (h *APIHandler) GetPaymentID(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		http.Error(w, "failed to get payment id", http.StatusBadRequest)
+		return
+	}
+
+	payment, err := h.svc.GetPaymentByID(r.Context(), id)
+	if err != nil {
+		http.Error(w, "failed to create payment ", http.StatusInternalServerError)
+		return
+	}
+	WriteJson(w, payment, http.StatusOK)
 }
 
 func main() {
