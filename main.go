@@ -43,7 +43,7 @@ type Service struct {
 	workers        int
 }
 
-func (s *Service) Start(ctx context.Context) {
+func (s *Service) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	for i := range s.workers {
 		g.Go(func() error {
@@ -51,7 +51,7 @@ func (s *Service) Start(ctx context.Context) {
 			return s.Work(ctx, i)
 		})
 	}
-	g.Wait()
+	return g.Wait()
 }
 
 func (s *Service) Work(ctx context.Context, id int) error {
@@ -68,7 +68,11 @@ func (s *Service) Work(ctx context.Context, id int) error {
 		unproccessable := false
 	retryLoop:
 		for i := range maxImmediateRetries {
-			resp, err := s.providerClient.http.Get(s.providerClient.baseURL)
+			req, err := http.NewRequestWithContext(ctx, "GET", s.providerClient.baseURL, nil)
+			if err != nil {
+				return err
+			}
+			resp, err := s.providerClient.http.Do(req)
 			if err != nil {
 				slog.Error("failed to request payment provider", "error", err)
 				continue
@@ -105,7 +109,6 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			Member: paymentID,
 		})
 	}
-	return nil
 }
 
 type ProviderClient struct {
@@ -134,8 +137,12 @@ func (s *Service) RetryWorker(ctx context.Context) {
 		slog.Info("retrying: ", "id", jobs[0].Member)
 		now := float64(time.Now().Unix())
 		if jobs[0].Score > now {
-			time.Sleep(time.Duration(jobs[0].Score-now) * time.Second)
-			continue
+			select {
+			case <-time.After(time.Duration(jobs[0].Score-now) * time.Second):
+				continue
+			case <-ctx.Done():
+				return
+			}
 		}
 
 		s.rdb.LPush(ctx, "main_queue", jobs[0].Member)
@@ -236,6 +243,9 @@ func main() {
 		baseURL: "http://localhost:3000",
 		http:    &http.Client{},
 	}
+
+	g, ctx := errgroup.WithContext(ctx)
+
 	r := http.NewServeMux()
 	dbPool, err := pgxpool.New(ctx, "postgresql://ayush:ayush@localhost:5432/okanedb")
 	if err != nil {
@@ -272,15 +282,23 @@ func main() {
 		IdleTimeout:  60 * time.Second,
 	}
 
-	go func() {
+	g.Go(func() error {
 		slog.Info("starting server on :8080")
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			log.Fatalln("server crashed:", err)
+			return err
 		}
-	}()
+		return nil
+	})
 
-	go svc.Start(ctx)
-	go svc.RetryWorker(ctx)
+	g.Go(func() error { return svc.Start(ctx) })
+
+	g.Go(func() error {
+		svc.RetryWorker(ctx)
+		return nil
+	})
+	if err := g.Wait(); err != nil {
+		slog.Error("critical failure", "error", err)
+	}
 	<-ctx.Done()
 	stop()
 	shutDownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
