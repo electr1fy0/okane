@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/redis/go-redis/v9"
 )
 
 type Payment struct {
@@ -33,7 +35,8 @@ type CreatePaymentParams struct {
 }
 
 type Service struct {
-	db *pgxpool.Pool
+	db  *pgxpool.Pool
+	rdb *redis.Client
 }
 
 func (s *Service) CreatePayment(ctx context.Context, params CreatePaymentParams) (*Payment, error) {
@@ -82,14 +85,22 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		Status:         "pending",
 		IdempotencyKey: uuid.NewString(),
 	})
-
 	if err != nil {
-		http.Error(w, "failed to create payment", http.StatusInternalServerError)
+		http.Error(w, "failed to create payment ", http.StatusInternalServerError)
+		return
+	}
+	err = h.svc.rdb.LPush(ctx, "main_queue", payment.ID.String()).Err()
+	if err != nil {
+		http.Error(w, "failed to push to redis"+err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	WriteJson(w, payment, http.StatusCreated)
+	WriteJson(w, payment, http.StatusAccepted)
 	// w.Write([]byte("meow"))
+}
+
+func process(paymentId string) {
+	fmt.Println("processing: ", paymentId)
 }
 
 func main() {
@@ -101,8 +112,16 @@ func main() {
 		log.Fatalln("failed to connect to db", err)
 	}
 
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     ":6379",
+		Password: "",
+		DB:       0,
+		Protocol: 2,
+	})
+
 	svc := &Service{
-		db: dbPool,
+		db:  dbPool,
+		rdb: rdb,
 	}
 
 	h := &APIHandler{
@@ -128,6 +147,15 @@ func main() {
 		}
 	}()
 
+	go func() {
+		for {
+			res, err := rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 0).Result()
+			if err != nil {
+				continue
+			}
+			process(res)
+		}
+	}()
 	<-ctx.Done()
 	stop()
 	shutDownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
