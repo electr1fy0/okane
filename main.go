@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"log/slog"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
@@ -222,6 +224,17 @@ func WriteJson(w http.ResponseWriter, data any, statusCode int) {
 	json.NewEncoder(w).Encode(data)
 }
 
+func (s *Service) GetPaymentByIdempotencyKey(ctx context.Context, key string) (Payment, error) {
+	query := `
+	select id, amount, status, idempotency_key
+	from payments where idempotency_key = $1
+	limit 1`
+	var payment Payment
+
+	err := s.db.QueryRow(ctx, query, key).Scan(&payment.ID, &payment.Amount, &payment.Status, &payment.IdempotencyKey)
+	return payment, err
+}
+
 func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -238,7 +251,22 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		IdempotencyKey: recPayment.IdempotencyKey,
 	})
 
+	var pgError *pgconn.PgError
 	if err != nil {
+		if errors.As(err, &pgError) {
+			slog.Warn("mapped to pgerror", "code", pgError.Code)
+
+			if pgError.Code == "23505" {
+				payment, err := h.svc.GetPaymentByIdempotencyKey(ctx, recPayment.IdempotencyKey)
+				if err != nil {
+					http.Error(w, "failed to get payment by idempotency key", http.StatusInternalServerError)
+					return
+				}
+
+				WriteJson(w, payment, http.StatusOK)
+				return
+			}
+		}
 		http.Error(w, "failed to create payment ", http.StatusInternalServerError)
 		return
 	}
