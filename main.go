@@ -46,37 +46,83 @@ type ProviderClient struct {
 	http    *http.Client
 }
 
-func (s *Service) Worker(ctx context.Context) {
+func (s *Service) RetryWorker(ctx context.Context) {
+	for {
+		jobs, _ := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
+			Key:     "delayed_queue",
+			ByScore: true,
+			Start:   "-inf",
+			Stop:    "+inf",
+			Offset:  0,
+			Count:   1,
+		}).Result()
+		if len(jobs) == 0 {
+			time.Sleep(1 * time.Second)
+			continue
+		}
+		slog.Info("retrying: ", "id", jobs[0].Member)
+		now := float64(time.Now().Unix())
+		if jobs[0].Score > now {
+			time.Sleep(time.Duration(jobs[0].Score-now) * time.Second)
+			continue
+		}
+		time.Sleep(time.Duration(jobs[0].Score))
+
+		s.rdb.LPush(ctx, "main_queue", jobs[0].Member)
+		s.rdb.ZRem(ctx, "delayed_queue", jobs[0].Member)
+	}
+}
+
+func (s *Service) MainWorker(ctx context.Context) {
 	for {
 		paymentID, err := s.rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 0).Result()
 		if err != nil {
 			continue
 		}
-		payment, err := s.GetPaymentByID(ctx, paymentID)
-		slog.Info("payment before processing:", "status", payment.Status)
-		process(paymentID)
-		s.UpdatePaymentStatus(ctx, paymentID, "processing")
-		updatedPayment, err := s.GetPaymentByID(ctx, paymentID)
-		slog.Info("payment during processing:", "status", updatedPayment.Status)
 
-		resp, err := s.providerClient.http.Get(s.providerClient.baseURL)
+		s.UpdatePaymentStatus(ctx, paymentID, "processing")
+
+		maxImmediateRetries := 1
+		success := false
+		unproccessable := false
+	retryLoop:
+		for i := range maxImmediateRetries {
+			resp, err := s.providerClient.http.Get(s.providerClient.baseURL)
+			if err != nil {
+				slog.Error("failed to request payment provider", "error", err)
+				continue
+			}
+
+			switch resp.StatusCode {
+			case http.StatusOK:
+				slog.Info("payment succcess", "id", paymentID)
+				s.UpdatePaymentStatus(ctx, paymentID, "success")
+				success = true
+				break retryLoop
+			case http.StatusServiceUnavailable:
+				slog.Info("service unavailable, should retry later", "id", paymentID, "attempt", i)
+				continue
+			case http.StatusUnprocessableEntity:
+				slog.Info("unprocessable payment, shouldn't retry this")
+				unproccessable = true
+				break retryLoop
+			}
+		}
+		err = s.rdb.LRem(ctx, "processing_queue", 1, paymentID).Err()
 		if err != nil {
-			slog.Error("failed to request payment provider", "error", err)
+			slog.Error("failed to remove req from processing queue", "error", err)
+		}
+		if success || unproccessable {
 			continue
 		}
-		switch resp.StatusCode {
-		case http.StatusOK:
-			slog.Info("payment succcess", "id", paymentID)
-			s.UpdatePaymentStatus(ctx, paymentID, "success")
-		case http.StatusServiceUnavailable:
-			slog.Info("service unavailable, should retry later")
-		case http.StatusUnprocessableEntity:
-			slog.Info("unprocessable payment, shouldn't retry this")
-		}
 
-		finalPayment, err := s.GetPaymentByID(ctx, paymentID)
-		slog.Info("payment after processing:", "status", finalPayment.Status)
+		backoff := 10 * time.Second
+		retryAt := time.Now().Add(backoff).Unix()
 
+		s.rdb.ZAdd(ctx, "delayed_queue", redis.Z{
+			Score:  float64(retryAt),
+			Member: paymentID,
+		})
 	}
 
 }
@@ -216,7 +262,8 @@ func main() {
 		}
 	}()
 
-	go svc.Worker(ctx)
+	go svc.MainWorker(ctx)
+	go svc.RetryWorker(ctx)
 	<-ctx.Done()
 	stop()
 	shutDownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
