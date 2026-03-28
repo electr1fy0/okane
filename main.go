@@ -82,7 +82,6 @@ retryLoop:
 			break retryLoop
 		case http.StatusServiceUnavailable:
 			slog.Info("service unavailable, should retry later", "id", paymentID, "attempt", i)
-			continue
 		case http.StatusUnprocessableEntity:
 			slog.Info("unprocessable payment, shouldn't retry this")
 			unproccessable = true
@@ -109,7 +108,7 @@ retryLoop:
 
 func (s *Service) Work(ctx context.Context, id int) error {
 	for {
-		paymentID, err := s.rdb.BLMove(ctx, "payments:pending", "payments:processing", "RIGHT", "LEFT", 2*time.Second).Result()
+		paymentID, err := s.rdb.BLPop(ctx, 1*time.Second, "payments:pending").Result()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -119,9 +118,12 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			}
 			return err
 		}
-		slog.Info("working", "payment id", paymentID, "workerid", id)
-
-		_ = s.processPayment(ctx, paymentID)
+		slog.Info("working", "payment id", paymentID[1], "workerid", id)
+		s.rdb.ZAdd(ctx, "payments:processing", redis.Z{
+			Score:  float64(time.Now().Unix()),
+			Member: paymentID[1],
+		})
+		_ = s.processPayment(context.WithoutCancel(ctx), paymentID[1])
 	}
 }
 
@@ -130,18 +132,31 @@ type ProviderClient struct {
 	http    *http.Client
 }
 
-// func (s *Service) ReaperWorker(ctx context.Context) error {
-// 	for {
-// 		jobs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-// 			Key:    "payment:processing",
-// 			Start:  "-inf",
-// 			Stop:   "+inf",
-// 			Offset: 0,
-// 			Count:  1,
-// 		}).Result()
+func (s *Service) ReaperWorker(ctx context.Context) error {
+	for {
+		select {
+		case <-time.After(10 * time.Second):
+		case <-ctx.Done():
+			return nil
+		}
 
-// 	}
-// }
+		jobs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
+			Key:     "payment:processing",
+			Start:   "-inf",
+			Stop:    time.Now().Add(-time.Minute),
+			Offset:  0,
+			Count:   5,
+			ByScore: true,
+		}).Result()
+		if err != nil {
+			return err
+		}
+
+		for _, job := range jobs {
+			s.rdb.LPush(ctx, "payments:pending", job.Member.(string))
+		}
+	}
+}
 
 func (s *Service) RetryWorker(ctx context.Context) error {
 	for {
@@ -150,9 +165,8 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 			ByScore: true,
 			Start:   "-inf",
 			Stop:    "+inf",
-
-			Offset: 0,
-			Count:  1,
+			Offset:  0,
+			Count:   1,
 		}).Result()
 		if err != nil {
 			if ctx.Err() != nil {
@@ -375,6 +389,9 @@ func main() {
 
 	g.Go(func() error {
 		return svc.RetryWorker(workerCtx)
+	})
+	g.Go(func() error {
+		return svc.ReaperWorker(workerCtx)
 	})
 
 	g.Go(func() error {
