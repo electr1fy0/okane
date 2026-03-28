@@ -27,9 +27,9 @@ type Payment struct {
 	Amount         int64     `json:"amount"`
 	Status         string    `json:"status"`
 	IdempotencyKey string    `json:"idempotency_key"`
-	ProviderRef    string    `json:"provider_ref"`
+	ProviderRef    *string   `json:"provider_ref,omitempty"`
 	Attempts       int       `json:"attempts"`
-	LastError      string    `json:"last_error"`
+	LastError      *string   `json:"last_error,omitempty"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
@@ -59,6 +59,7 @@ func (s *Service) Start(ctx context.Context) error {
 }
 
 func (s *Service) processPayment(ctx context.Context, paymentID string) error {
+	slog.Info("processing payment", "payment_id", paymentID)
 	s.UpdatePayment(ctx, paymentID, "processing", "", false)
 	maxImmediateRetries := 1
 	success := false
@@ -78,18 +79,18 @@ retryLoop:
 
 		switch resp.StatusCode {
 		case http.StatusOK:
-			slog.Info("payment succcess", "id", paymentID)
-			s.UpdatePayment(ctx, paymentID, "success", "", false)
+			slog.Info("provider accepted payment", "payment_id", paymentID)
+			s.UpdatePayment(ctx, paymentID, "success", "", true)
 			success = true
 			break retryLoop
 		case http.StatusServiceUnavailable:
-			slog.Info("service unavailable, should retry later", "id", paymentID, "attempt", i)
+			slog.Warn("provider unavailable", "payment_id", paymentID, "attempt", i)
 			err = s.UpdatePayment(ctx, paymentID, "processing", "service unavailable", true)
 			if err != nil {
 				return err
 			}
 		case http.StatusUnprocessableEntity:
-			slog.Info("unprocessable payment, shouldn't retry this")
+			slog.Warn("provider rejected payment", "payment_id", paymentID)
 			s.UpdatePayment(ctx, paymentID, "failed", "unprocessable payment", false)
 			unproccessable = true
 			break retryLoop
@@ -98,6 +99,7 @@ retryLoop:
 
 	_ = s.rdb.LRem(ctx, "payments:processing", 1, paymentID).Err()
 	_ = s.rdb.HDel(ctx, "payments:processing:times", paymentID).Err()
+	slog.Info("removed payment from processing", "payment_id", paymentID)
 
 	if success || unproccessable {
 		return nil
@@ -110,6 +112,7 @@ retryLoop:
 		Score:  float64(retryAt),
 		Member: paymentID,
 	})
+	slog.Info("scheduled payment retry", "payment_id", paymentID, "retry_at", retryAt)
 
 	return nil
 }
@@ -117,6 +120,7 @@ retryLoop:
 func (s *Service) Work(ctx context.Context, id int) error {
 	for {
 		paymentID, err := s.rdb.BLMove(ctx, "payments:pending", "payments:processing", "RIGHT", "LEFT", 1*time.Second).Result()
+
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -132,7 +136,7 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			return err
 		}
 
-		slog.Info("working", "payment id", paymentID, "workerid", id)
+		slog.Info("worker picked payment", "payment_id", paymentID, "worker_id", id)
 
 		payment, err := s.GetPaymentByID(ctx, paymentID)
 		if err != nil {
@@ -142,12 +146,20 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
 			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
 			s.rdb.LPush(ctx, "payments:dead", paymentID)
-			s.UpdatePayment(ctx, paymentID, "failed", payment.LastError, false)
+			lastError := ""
+			if payment.LastError != nil {
+				lastError = *payment.LastError
+			}
+			s.UpdatePayment(ctx, paymentID, "failed", lastError, false)
+			slog.Warn("payment moved to dead queue", "payment_id", paymentID, "attempts", payment.Attempts)
 
 			continue
 		}
 
-		_ = s.processPayment(context.WithoutCancel(ctx), paymentID)
+		err = s.processPayment(context.WithoutCancel(ctx), paymentID)
+		if err != nil {
+			return err
+		}
 	}
 }
 
@@ -354,6 +366,7 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to decode the payment", http.StatusBadRequest)
 		return
 	}
+	slog.Info("create payment request", "idempotency_key", recPayment.IdempotencyKey, "amount", recPayment.Amount)
 
 	payment, err := h.svc.CreatePayment(ctx, CreatePaymentParams{
 		Amount:         recPayment.Amount,
@@ -372,6 +385,7 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 					http.Error(w, "failed to get payment by idempotency key", http.StatusInternalServerError)
 					return
 				}
+				slog.Info("returning existing payment for idempotent request", "payment_id", payment.ID, "idempotency_key", recPayment.IdempotencyKey)
 
 				WriteJson(w, CreatePaymentResponse{
 					Payment:  payment,
@@ -384,13 +398,14 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create payment ", http.StatusInternalServerError)
 		return
 	}
+	slog.Info("created payment", "payment_id", payment.ID, "status", payment.Status)
 
 	err = h.svc.rdb.LPush(ctx, "payments:pending", payment.ID.String()).Err()
 	if err != nil {
 		http.Error(w, "failed to push to redis"+err.Error(), http.StatusInternalServerError)
 		return
 	}
-
+	slog.Info("enqueued payment", "payment_id", payment.ID)
 	WriteJson(w, CreatePaymentResponse{
 		Payment:  *payment,
 		Created:  true,
@@ -404,12 +419,14 @@ func (h *APIHandler) GetPaymentID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to get payment id", http.StatusBadRequest)
 		return
 	}
+	slog.Info("get payment request", "payment_id", id)
 
 	payment, err := h.svc.GetPaymentByID(r.Context(), id)
 	if err != nil {
 		http.Error(w, "failed to create payment ", http.StatusInternalServerError)
 		return
 	}
+	slog.Info("returning payment", "payment_id", payment.ID, "status", payment.Status, "attempts", payment.Attempts)
 	WriteJson(w, GetPaymentResponse{
 		Payment: payment,
 	}, http.StatusOK)
