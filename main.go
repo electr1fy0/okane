@@ -48,6 +48,14 @@ type Service struct {
 	workers        int
 }
 
+func mustGetEnv(key string) string {
+	value := os.Getenv(key)
+	if value == "" {
+		log.Fatalf("missing required env var %s", key)
+	}
+	return value
+}
+
 func (s *Service) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	for i := range s.workers {
@@ -473,21 +481,25 @@ func main() {
 	}
 	addr := ":" + port
 
+	providerBaseURL := mustGetEnv("PROVIDER_BASE_URL")
+	databaseURL := mustGetEnv("DATABASE_URL")
+	redisAddr := mustGetEnv("REDIS_ADDR")
+
 	providerClient := ProviderClient{
-		baseURL: "http://localhost:3000",
+		baseURL: providerBaseURL,
 		http:    &http.Client{},
 	}
 
 	g, workerCtx := errgroup.WithContext(sigCtx)
 
 	r := http.NewServeMux()
-	dbPool, err := pgxpool.New(sigCtx, "postgresql://ayush:ayush@localhost:5432/okanedb")
+	dbPool, err := pgxpool.New(sigCtx, databaseURL)
 	if err != nil {
 		log.Fatalln("failed to connect to db", err)
 	}
 
 	rdb := redis.NewClient(&redis.Options{
-		Addr:     ":6379",
+		Addr:     redisAddr,
 		Password: "",
 		DB:       0,
 		Protocol: 2,

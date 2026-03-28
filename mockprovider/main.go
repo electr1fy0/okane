@@ -2,11 +2,13 @@ package main
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"math/rand"
 	"net/http"
+	"os"
 
 	"github.com/google/uuid"
+	"github.com/joho/godotenv"
 )
 
 type MockProvider struct{}
@@ -19,15 +21,32 @@ func (m *MockProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]string{
 			"provider_ref": uuid.NewString(),
 		})
+		slog.Info("mock provider response", "status", http.StatusOK)
 	case n < 90:
 		w.WriteHeader(http.StatusServiceUnavailable)
+		slog.Info("mock provider response", "status", http.StatusServiceUnavailable)
 	default:
 		w.WriteHeader(http.StatusUnprocessableEntity)
+		slog.Info("mock provider response", "status", http.StatusUnprocessableEntity)
 	}
 }
 
 func main() {
+	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
+	slog.SetDefault(logger)
+
+	_ = godotenv.Load()
+
+	port := os.Getenv("MOCK_PROVIDER_PORT")
+	if port == "" {
+		port = "3000"
+	}
+
 	m := MockProvider{}
 	http.HandleFunc("/", m.ServeHTTP)
-	log.Fatal(http.ListenAndServe(":3000", nil))
+	slog.Info("starting mock provider server", "port", port)
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		slog.Error("server failed", "error", err)
+		os.Exit(1)
+	}
 }
