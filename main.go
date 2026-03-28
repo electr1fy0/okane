@@ -237,11 +237,21 @@ func (s *Service) UpdatePaymentStatus(ctx context.Context, id string, status str
 
 func (s *Service) GetPaymentByID(ctx context.Context, id string) (Payment, error) {
 	query := `
-	select id, amount, status, idempotency_key, created_at from payments where id = $1;
+	select id, amount, status, idempotency_key, provider_ref, attempts, last_error, created_at, updated_at from payments where id = $1;
 	`
 	payment := Payment{}
 
-	err := s.db.QueryRow(ctx, query, id).Scan(&payment.ID, &payment.Amount, &payment.Status, &payment.IdempotencyKey, &payment.CreatedAt)
+	err := s.db.QueryRow(ctx, query, id).Scan(
+		&payment.ID,
+		&payment.Amount,
+		&payment.Status,
+		&payment.IdempotencyKey,
+		&payment.ProviderRef,
+		&payment.Attempts,
+		&payment.LastError,
+		&payment.CreatedAt,
+		&payment.UpdatedAt,
+	)
 	return payment, err
 
 }
@@ -278,19 +288,40 @@ type APIHandler struct {
 	svc *Service
 }
 
+type CreatePaymentResponse struct {
+	Payment  Payment `json:"payment"`
+	Created  bool    `json:"created"`
+	Enqueued bool    `json:"enqueued"`
+}
+
+type GetPaymentResponse struct {
+	Payment Payment `json:"payment"`
+}
+
 func WriteJson(w http.ResponseWriter, data any, statusCode int) {
+	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	json.NewEncoder(w).Encode(data)
 }
 
 func (s *Service) GetPaymentByIdempotencyKey(ctx context.Context, key string) (Payment, error) {
 	query := `
-	select id, amount, status, idempotency_key
+	select id, amount, status, idempotency_key, provider_ref, attempts, last_error, created_at, updated_at
 	from payments where idempotency_key = $1
 	limit 1`
 	var payment Payment
 
-	err := s.db.QueryRow(ctx, query, key).Scan(&payment.ID, &payment.Amount, &payment.Status, &payment.IdempotencyKey)
+	err := s.db.QueryRow(ctx, query, key).Scan(
+		&payment.ID,
+		&payment.Amount,
+		&payment.Status,
+		&payment.IdempotencyKey,
+		&payment.ProviderRef,
+		&payment.Attempts,
+		&payment.LastError,
+		&payment.CreatedAt,
+		&payment.UpdatedAt,
+	)
 	return payment, err
 }
 
@@ -322,7 +353,11 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 
-				WriteJson(w, payment, http.StatusOK)
+				WriteJson(w, CreatePaymentResponse{
+					Payment:  payment,
+					Created:  false,
+					Enqueued: false,
+				}, http.StatusOK)
 				return
 			}
 		}
@@ -336,7 +371,11 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	WriteJson(w, payment, http.StatusAccepted)
+	WriteJson(w, CreatePaymentResponse{
+		Payment:  *payment,
+		Created:  true,
+		Enqueued: true,
+	}, http.StatusAccepted)
 }
 
 func (h *APIHandler) GetPaymentID(w http.ResponseWriter, r *http.Request) {
@@ -351,7 +390,9 @@ func (h *APIHandler) GetPaymentID(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to create payment ", http.StatusInternalServerError)
 		return
 	}
-	WriteJson(w, payment, http.StatusOK)
+	WriteJson(w, GetPaymentResponse{
+		Payment: payment,
+	}, http.StatusOK)
 }
 
 func main() {
@@ -393,6 +434,7 @@ func main() {
 	}
 
 	r.HandleFunc("/payments", h.CreatePayment)
+	r.HandleFunc("GET /payments/{id}", h.GetPaymentID)
 	server := &http.Server{
 		Addr:    ":8080",
 		Handler: r,
