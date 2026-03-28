@@ -64,6 +64,7 @@ func (s *Service) processPayment(ctx context.Context, paymentID string) error {
 	unproccessable := false
 retryLoop:
 	for i := range maxImmediateRetries {
+
 		req, err := http.NewRequestWithContext(ctx, "GET", s.providerClient.baseURL, nil)
 		if err != nil {
 			return err
@@ -82,10 +83,16 @@ retryLoop:
 			break retryLoop
 		case http.StatusServiceUnavailable:
 			slog.Info("service unavailable, should retry later", "id", paymentID, "attempt", i)
+			s.UpdatePaymentStatus(ctx, paymentID, "service_unavailable")
 		case http.StatusUnprocessableEntity:
 			slog.Info("unprocessable payment, shouldn't retry this")
+			s.UpdatePaymentStatus(ctx, paymentID, "unprocessable_payment")
 			unproccessable = true
 			break retryLoop
+		}
+		err = s.IncrementPaymentAttempts(ctx, paymentID)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -118,7 +125,18 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			}
 			return err
 		}
+
 		slog.Info("working", "payment id", paymentID[1], "workerid", id)
+
+		payment, err := s.GetPaymentByID(ctx, paymentID[1])
+		if err != nil {
+			return err
+		}
+		if payment.Attempts >= 8 {
+			s.rdb.LPush(ctx, "payments:dead", paymentID[1])
+			continue
+		}
+
 		s.rdb.ZAdd(ctx, "payments:processing", redis.Z{
 			Score:  float64(time.Now().Unix()),
 			Member: paymentID[1],
@@ -154,6 +172,7 @@ func (s *Service) ReaperWorker(ctx context.Context) error {
 
 		for _, job := range jobs {
 			s.rdb.LPush(ctx, "payments:pending", job.Member.(string))
+			s.rdb.ZRem(ctx, "payments:processing", job.Member)
 		}
 	}
 }
@@ -197,6 +216,14 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 		s.rdb.LPush(ctx, "payments:pending", jobs[0].Member)
 		s.rdb.ZRem(ctx, "payments:delayed", jobs[0].Member)
 	}
+}
+
+func (s *Service) IncrementPaymentAttempts(ctx context.Context, id string) error {
+	query := `
+	update payments set attempts = attempts + 1`
+
+	_, err := s.db.Exec(ctx, query)
+	return err
 }
 
 func (s *Service) UpdatePaymentStatus(ctx context.Context, id string, status string) error {
