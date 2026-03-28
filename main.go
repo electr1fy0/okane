@@ -80,7 +80,21 @@ retryLoop:
 		switch resp.StatusCode {
 		case http.StatusOK:
 			slog.Info("provider accepted payment", "payment_id", paymentID)
-			s.UpdatePayment(ctx, paymentID, "success", "", true)
+			var respStruct struct {
+				ProviderRef string `json:"provider_ref"`
+			}
+			err = json.NewDecoder(resp.Body).Decode(&respStruct)
+			if err != nil {
+				return err
+			}
+			err = s.UpdatePayment(ctx, paymentID, "success", "", true)
+			if err != nil {
+				return err
+			}
+			err = s.UpdateProviderRef(ctx, paymentID, respStruct.ProviderRef)
+			if err != nil {
+				return err
+			}
 			success = true
 			break retryLoop
 		case http.StatusServiceUnavailable:
@@ -263,6 +277,18 @@ func (s *Service) UpdatePayment(ctx context.Context, id, status, lastError strin
 	}
 
 	_, err := s.db.Exec(ctx, query, status, lastError, attemptDelta, id)
+
+	return err
+}
+
+func (s *Service) UpdateProviderRef(ctx context.Context, id, providerRef string) error {
+	query := `
+		update payments
+		set provider_ref = $1,
+			updated_at = now()
+		where id = $2`
+
+	_, err := s.db.Exec(ctx, query, providerRef, id)
 
 	return err
 }

@@ -17,7 +17,7 @@ func (m *MockProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	case n < 80:
 		w.WriteHeader(http.StatusOK)
 		json.NewEncoder(w).Encode(map[string]string{
-			"ref": uuid.NewString(),
+			"provider_ref": uuid.NewString(),
 		})
 	case n < 90:
 		w.WriteHeader(http.StatusServiceUnavailable)
