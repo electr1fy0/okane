@@ -57,9 +57,59 @@ func (s *Service) Start(ctx context.Context) error {
 	return g.Wait()
 }
 
+func (s *Service) processPayment(ctx context.Context, paymentID string) error {
+	s.UpdatePaymentStatus(ctx, paymentID, "processing")
+	maxImmediateRetries := 1
+	success := false
+	unproccessable := false
+retryLoop:
+	for i := range maxImmediateRetries {
+		req, err := http.NewRequestWithContext(ctx, "GET", s.providerClient.baseURL, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := s.providerClient.http.Do(req)
+		if err != nil {
+			slog.Error("failed to request payment provider", "error", err)
+			continue
+		}
+
+		switch resp.StatusCode {
+		case http.StatusOK:
+			slog.Info("payment succcess", "id", paymentID)
+			s.UpdatePaymentStatus(ctx, paymentID, "success")
+			success = true
+			break retryLoop
+		case http.StatusServiceUnavailable:
+			slog.Info("service unavailable, should retry later", "id", paymentID, "attempt", i)
+			continue
+		case http.StatusUnprocessableEntity:
+			slog.Info("unprocessable payment, shouldn't retry this")
+			unproccessable = true
+			break retryLoop
+		}
+	}
+
+	_ = s.rdb.LRem(ctx, "payments:processing", 1, paymentID).Err()
+
+	if success || unproccessable {
+		return nil
+	}
+
+	backoff := 10 * time.Second
+	retryAt := time.Now().Add(backoff).Unix()
+
+	s.rdb.ZAdd(ctx, "payments:delayed", redis.Z{
+		Score:  float64(retryAt),
+		Member: paymentID,
+	})
+
+	return nil
+}
+
 func (s *Service) Work(ctx context.Context, id int) error {
 	for {
-		paymentID, err := s.rdb.BLMove(ctx, "main_queue", "processing_queue", "RIGHT", "LEFT", 2*time.Second).Result()
+		paymentID, err := s.rdb.BLMove(ctx, "payments:pending", "payments:processing", "RIGHT", "LEFT", 2*time.Second).Result()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -70,53 +120,8 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			return err
 		}
 		slog.Info("working", "payment id", paymentID, "workerid", id)
-		s.UpdatePaymentStatus(ctx, paymentID, "processing")
 
-		maxImmediateRetries := 1
-		success := false
-		unproccessable := false
-	retryLoop:
-		for i := range maxImmediateRetries {
-			req, err := http.NewRequestWithContext(ctx, "GET", s.providerClient.baseURL, nil)
-			if err != nil {
-				return err
-			}
-			resp, err := s.providerClient.http.Do(req)
-			if err != nil {
-				slog.Error("failed to request payment provider", "error", err)
-				continue
-			}
-
-			switch resp.StatusCode {
-			case http.StatusOK:
-				slog.Info("payment succcess", "id", paymentID)
-				s.UpdatePaymentStatus(ctx, paymentID, "success")
-				success = true
-				break retryLoop
-			case http.StatusServiceUnavailable:
-				slog.Info("service unavailable, should retry later", "id", paymentID, "attempt", i)
-				continue
-			case http.StatusUnprocessableEntity:
-				slog.Info("unprocessable payment, shouldn't retry this")
-				unproccessable = true
-				break retryLoop
-			}
-		}
-		err = s.rdb.LRem(ctx, "processing_queue", 1, paymentID).Err()
-		if err != nil {
-			slog.Error("failed to remove req from processing queue", "error", err)
-		}
-		if success || unproccessable {
-			continue
-		}
-
-		backoff := 10 * time.Second
-		retryAt := time.Now().Add(backoff).Unix()
-
-		s.rdb.ZAdd(ctx, "delayed_queue", redis.Z{
-			Score:  float64(retryAt),
-			Member: paymentID,
-		})
+		_ = s.processPayment(ctx, paymentID)
 	}
 }
 
@@ -125,10 +130,23 @@ type ProviderClient struct {
 	http    *http.Client
 }
 
+// func (s *Service) ReaperWorker(ctx context.Context) error {
+// 	for {
+// 		jobs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
+// 			Key:    "payment:processing",
+// 			Start:  "-inf",
+// 			Stop:   "+inf",
+// 			Offset: 0,
+// 			Count:  1,
+// 		}).Result()
+
+// 	}
+// }
+
 func (s *Service) RetryWorker(ctx context.Context) error {
 	for {
 		jobs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-			Key:     "delayed_queue",
+			Key:     "payments:delayed",
 			ByScore: true,
 			Start:   "-inf",
 			Stop:    "+inf",
@@ -162,8 +180,8 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 			}
 		}
 
-		s.rdb.LPush(ctx, "main_queue", jobs[0].Member)
-		s.rdb.ZRem(ctx, "delayed_queue", jobs[0].Member)
+		s.rdb.LPush(ctx, "payments:pending", jobs[0].Member)
+		s.rdb.ZRem(ctx, "payments:delayed", jobs[0].Member)
 	}
 }
 
@@ -271,7 +289,7 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = h.svc.rdb.LPush(ctx, "main_queue", payment.ID.String()).Err()
+	err = h.svc.rdb.LPush(ctx, "payments:pending", payment.ID.String()).Err()
 	if err != nil {
 		http.Error(w, "failed to push to redis"+err.Error(), http.StatusInternalServerError)
 		return
