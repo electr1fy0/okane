@@ -23,6 +23,23 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+const (
+	maxImmediateRetries  = 1
+	maxAttemptsBeforeDLQ = 8
+	delayedRetryBackoff  = 10 * time.Second
+	workerCount          = 5
+
+	queuePollTimeout      = 1 * time.Second
+	reaperInterval        = 10 * time.Second
+	processingTimeout     = 1 * time.Minute
+	retryWorkerPollPeriod = 1 * time.Second
+
+	serverReadTimeout     = 5 * time.Second
+	serverWriteTimeout    = 10 * time.Second
+	serverIdleTimeout     = 60 * time.Second
+	serverShutdownTimeout = 10 * time.Second
+)
+
 type Payment struct {
 	ID             uuid.UUID `json:"id"`
 	Amount         int64     `json:"amount"`
@@ -58,21 +75,25 @@ func mustGetEnv(key string) string {
 
 func (s *Service) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
+	slog.Info("starting workers", "count", s.workers)
 	for i := range s.workers {
+		workerID := i
 		g.Go(func() error {
-			return s.Work(ctx, i)
+			slog.Info("worker started", "worker_id", workerID)
+			return s.Work(ctx, workerID)
 		})
 	}
 	return g.Wait()
 }
 
 func (s *Service) processPayment(ctx context.Context, paymentID string) error {
+	slog.Info("payment processing started", "payment_id", paymentID)
 	s.UpdatePayment(ctx, paymentID, "processing", "", false)
-	maxImmediateRetries := 1
 	success := false
 	unproccessable := false
 retryLoop:
 	for i := range maxImmediateRetries {
+		slog.Info("calling provider", "payment_id", paymentID, "attempt", i+1)
 
 		req, err := http.NewRequestWithContext(ctx, "GET", s.providerClient.baseURL, nil)
 		if err != nil {
@@ -104,15 +125,18 @@ retryLoop:
 				slog.Error("failed to update provider ref", "payment_id", paymentID, "error", err)
 				return err
 			}
+			slog.Info("payment succeeded", "payment_id", paymentID, "provider_ref", respStruct.ProviderRef)
 			success = true
 			break retryLoop
 		case http.StatusServiceUnavailable:
+			slog.Warn("provider unavailable", "payment_id", paymentID, "attempt", i+1)
 			err = s.UpdatePayment(ctx, paymentID, "processing", "service unavailable", true)
 			if err != nil {
 				slog.Error("failed to update retryable payment state", "payment_id", paymentID, "attempt", i, "error", err)
 				return err
 			}
 		case http.StatusUnprocessableEntity:
+			slog.Warn("payment rejected by provider", "payment_id", paymentID)
 			err = s.UpdatePayment(ctx, paymentID, "failed", "unprocessable payment", false)
 			if err != nil {
 				slog.Error("failed to update failed payment state", "payment_id", paymentID, "error", err)
@@ -130,20 +154,20 @@ retryLoop:
 		return nil
 	}
 
-	backoff := 10 * time.Second
-	retryAt := time.Now().Add(backoff).Unix()
+	retryAt := time.Now().Add(delayedRetryBackoff).Unix()
 
 	s.rdb.ZAdd(ctx, "payments:delayed", redis.Z{
 		Score:  float64(retryAt),
 		Member: paymentID,
 	})
+	slog.Info("payment scheduled for retry", "payment_id", paymentID, "retry_at_unix", retryAt)
 
 	return nil
 }
 
 func (s *Service) Work(ctx context.Context, id int) error {
 	for {
-		paymentID, err := s.rdb.BLMove(ctx, "payments:pending", "payments:processing", "RIGHT", "LEFT", 1*time.Second).Result()
+		paymentID, err := s.rdb.BLMove(ctx, "payments:pending", "payments:processing", "RIGHT", "LEFT", queuePollTimeout).Result()
 
 		if err != nil {
 			if ctx.Err() != nil {
@@ -160,13 +184,14 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			slog.Error("failed to mark payment processing time", "payment_id", paymentID, "error", err)
 			return err
 		}
+		slog.Info("worker picked payment", "worker_id", id, "payment_id", paymentID)
 
 		payment, err := s.GetPaymentByID(ctx, paymentID)
 		if err != nil {
 			slog.Error("failed to load payment", "payment_id", paymentID, "worker_id", id, "error", err)
 			return err
 		}
-		if payment.Attempts >= 8 {
+		if payment.Attempts >= maxAttemptsBeforeDLQ {
 			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
 			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
 			s.rdb.LPush(ctx, "payments:dead", paymentID)
@@ -179,6 +204,7 @@ func (s *Service) Work(ctx context.Context, id int) error {
 				slog.Error("failed to update dead-lettered payment", "payment_id", paymentID, "error", err)
 				return err
 			}
+			slog.Warn("payment moved to dead queue", "payment_id", paymentID, "attempts", payment.Attempts)
 
 			continue
 		}
@@ -197,9 +223,10 @@ type ProviderClient struct {
 }
 
 func (s *Service) ReaperWorker(ctx context.Context) error {
+	slog.Info("reaper worker started")
 	for {
 		select {
-		case <-time.After(10 * time.Second):
+		case <-time.After(reaperInterval):
 		case <-ctx.Done():
 			return nil
 		}
@@ -221,7 +248,7 @@ func (s *Service) ReaperWorker(ctx context.Context) error {
 					slog.Error("failed to parse timestamp", "id", paymentID, "error", err)
 					continue
 				}
-				if time.Since(time.Unix(tsInt, 0)) < time.Minute {
+				if time.Since(time.Unix(tsInt, 0)) < processingTimeout {
 					continue
 				}
 			}
@@ -229,11 +256,13 @@ func (s *Service) ReaperWorker(ctx context.Context) error {
 			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
 			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
 			s.rdb.LPush(ctx, "payments:pending", paymentID)
+			slog.Warn("reaper requeued payment", "payment_id", paymentID)
 		}
 	}
 }
 
 func (s *Service) RetryWorker(ctx context.Context) error {
+	slog.Info("retry worker started")
 	for {
 		jobs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
 			Key:     "payments:delayed",
@@ -254,7 +283,7 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 			select {
 			case <-ctx.Done():
 				return err
-			case <-time.After(1 * time.Second):
+			case <-time.After(retryWorkerPollPeriod):
 				continue
 			}
 		}
@@ -270,6 +299,7 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 
 		s.rdb.LPush(ctx, "payments:pending", jobs[0].Member)
 		s.rdb.ZRem(ctx, "payments:delayed", jobs[0].Member)
+		slog.Info("retry worker requeued payment", "payment_id", jobs[0].Member)
 	}
 }
 
@@ -509,7 +539,7 @@ func main() {
 		db:             dbPool,
 		rdb:            rdb,
 		providerClient: &providerClient,
-		workers:        5,
+		workers:        workerCount,
 	}
 
 	h := &APIHandler{
@@ -524,9 +554,9 @@ func main() {
 		BaseContext: func(_ net.Listener) context.Context {
 			return sigCtx
 		},
-		ReadTimeout:  5 * time.Second,
-		WriteTimeout: 10 * time.Second,
-		IdleTimeout:  60 * time.Second,
+		ReadTimeout:  serverReadTimeout,
+		WriteTimeout: serverWriteTimeout,
+		IdleTimeout:  serverIdleTimeout,
 	}
 
 	g.Go(func() error {
@@ -549,7 +579,7 @@ func main() {
 	g.Go(func() error {
 		<-sigCtx.Done()
 		fmt.Print("sigctx done")
-		shutDownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutDownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
 		defer cancel()
 
 		err = server.Shutdown(shutDownCtx)
