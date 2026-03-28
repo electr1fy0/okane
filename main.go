@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -26,9 +27,9 @@ type Payment struct {
 	Amount         int64     `json:"amount"`
 	Status         string    `json:"status"`
 	IdempotencyKey string    `json:"idempotency_key"`
-	ProviderRef    *string   `json:"provider_ref,omitempty"`
+	ProviderRef    string    `json:"provider_ref"`
 	Attempts       int       `json:"attempts"`
-	LastError      *string   `json:"last_error,omitempty"`
+	LastError      string    `json:"last_error"`
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
 }
@@ -58,7 +59,7 @@ func (s *Service) Start(ctx context.Context) error {
 }
 
 func (s *Service) processPayment(ctx context.Context, paymentID string) error {
-	s.UpdatePaymentStatus(ctx, paymentID, "processing")
+	s.UpdatePayment(ctx, paymentID, "processing", "", false)
 	maxImmediateRetries := 1
 	success := false
 	unproccessable := false
@@ -78,25 +79,25 @@ retryLoop:
 		switch resp.StatusCode {
 		case http.StatusOK:
 			slog.Info("payment succcess", "id", paymentID)
-			s.UpdatePaymentStatus(ctx, paymentID, "success")
+			s.UpdatePayment(ctx, paymentID, "success", "", false)
 			success = true
 			break retryLoop
 		case http.StatusServiceUnavailable:
 			slog.Info("service unavailable, should retry later", "id", paymentID, "attempt", i)
-			s.UpdatePaymentStatus(ctx, paymentID, "service_unavailable")
+			err = s.UpdatePayment(ctx, paymentID, "processing", "service unavailable", true)
+			if err != nil {
+				return err
+			}
 		case http.StatusUnprocessableEntity:
 			slog.Info("unprocessable payment, shouldn't retry this")
-			s.UpdatePaymentStatus(ctx, paymentID, "unprocessable_payment")
+			s.UpdatePayment(ctx, paymentID, "failed", "unprocessable payment", false)
 			unproccessable = true
 			break retryLoop
-		}
-		err = s.IncrementPaymentAttempts(ctx, paymentID)
-		if err != nil {
-			return err
 		}
 	}
 
 	_ = s.rdb.LRem(ctx, "payments:processing", 1, paymentID).Err()
+	_ = s.rdb.HDel(ctx, "payments:processing:times", paymentID).Err()
 
 	if success || unproccessable {
 		return nil
@@ -115,7 +116,7 @@ retryLoop:
 
 func (s *Service) Work(ctx context.Context, id int) error {
 	for {
-		paymentID, err := s.rdb.BLPop(ctx, 1*time.Second, "payments:pending").Result()
+		paymentID, err := s.rdb.BLMove(ctx, "payments:pending", "payments:processing", "RIGHT", "LEFT", 1*time.Second).Result()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -126,22 +127,27 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			return err
 		}
 
-		slog.Info("working", "payment id", paymentID[1], "workerid", id)
+		err = s.rdb.HSet(ctx, "payments:processing:times", paymentID, time.Now().Unix()).Err()
+		if err != nil {
+			return err
+		}
 
-		payment, err := s.GetPaymentByID(ctx, paymentID[1])
+		slog.Info("working", "payment id", paymentID, "workerid", id)
+
+		payment, err := s.GetPaymentByID(ctx, paymentID)
 		if err != nil {
 			return err
 		}
 		if payment.Attempts >= 8 {
-			s.rdb.LPush(ctx, "payments:dead", paymentID[1])
+			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
+			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
+			s.rdb.LPush(ctx, "payments:dead", paymentID)
+			s.UpdatePayment(ctx, paymentID, "failed", payment.LastError, false)
+
 			continue
 		}
 
-		s.rdb.ZAdd(ctx, "payments:processing", redis.Z{
-			Score:  float64(time.Now().Unix()),
-			Member: paymentID[1],
-		})
-		_ = s.processPayment(context.WithoutCancel(ctx), paymentID[1])
+		_ = s.processPayment(context.WithoutCancel(ctx), paymentID)
 	}
 }
 
@@ -158,21 +164,33 @@ func (s *Service) ReaperWorker(ctx context.Context) error {
 			return nil
 		}
 
-		jobs, err := s.rdb.ZRangeArgsWithScores(ctx, redis.ZRangeArgs{
-			Key:     "payment:processing",
-			Start:   "-inf",
-			Stop:    time.Now().Add(-time.Minute),
-			Offset:  0,
-			Count:   5,
-			ByScore: true,
-		}).Result()
+		paymentIDs, err := s.rdb.LRange(ctx, "payments:processing", 0, 9).Result()
 		if err != nil {
 			return err
 		}
 
-		for _, job := range jobs {
-			s.rdb.LPush(ctx, "payments:pending", job.Member.(string))
-			s.rdb.ZRem(ctx, "payments:processing", job.Member)
+		for _, paymentID := range paymentIDs {
+			ts, err := s.rdb.HGet(ctx, "payments:processing:times", paymentID).Result()
+			if err == redis.Nil {
+				slog.Warn("no timestamp found, requeuing immediately", "id", paymentID)
+			} else if err != nil {
+				slog.Error("failed to get processing time", "id", paymentID, "error", err)
+				continue
+			} else {
+				tsInt, err := strconv.ParseInt(ts, 10, 64)
+				if err != nil {
+					slog.Error("failed to parse timestamp", "id", paymentID, "error", err)
+					continue
+				}
+				if time.Since(time.Unix(tsInt, 0)) < time.Minute {
+					continue
+				}
+			}
+
+			slog.Warn("requeuing stuck job", "id", paymentID)
+			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
+			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
+			s.rdb.LPush(ctx, "payments:pending", paymentID)
 		}
 	}
 }
@@ -218,19 +236,21 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 	}
 }
 
-func (s *Service) IncrementPaymentAttempts(ctx context.Context, id string) error {
+func (s *Service) UpdatePayment(ctx context.Context, id, status, lastError string, incrementAttempts bool) error {
 	query := `
-	update payments set attempts = attempts + 1`
+		update payments
+		set status = $1,
+			last_error = $2,
+			attempts = attempts + $3,
+			updated_at = now()
+		where id = $4`
 
-	_, err := s.db.Exec(ctx, query)
-	return err
-}
+	attemptDelta := 0
+	if incrementAttempts {
+		attemptDelta = 1
+	}
 
-func (s *Service) UpdatePaymentStatus(ctx context.Context, id string, status string) error {
-	query := `
-		update payments set status = $1 where id = $2`
-
-	_, err := s.db.Exec(ctx, query, status, id)
+	_, err := s.db.Exec(ctx, query, status, lastError, attemptDelta, id)
 
 	return err
 }
