@@ -1,7 +1,7 @@
 create table payments (
     id  uuid primary key default gen_random_uuid(),
     amount BIGINT NOT NULL,
-    status text not null,
+    status text not null check (status in ('pending', 'processing', 'success', 'failed_retryable', 'failed_final')),
     idempotency_key text unique not null,
     provider_ref text,
     attempts int default 0,

@@ -16,7 +16,7 @@ flowchart TD
     Pending -->|BLMOVE| WorkerPool["Worker Pool"]
     WorkerPool -->|move to| Processing["payments:processing"]
     WorkerPool -->|provider call| Provider["Mock Provider"]
-    WorkerPool -->|success/failed| PG
+    WorkerPool -->|success/failure| PG
     WorkerPool -->|retryable failure| Delayed["payments:delayed"]
     WorkerPool -->|attempts >= n| Dead["payments:dead"]
 
@@ -34,12 +34,12 @@ flowchart TD
 3. Worker calls the mock provider and handles responses:
    - 200 OK: updates status to "success", stores provider ref, removes from processing queue
    - 503 unavailable: increments attempts, continues immediate retry loop (up to 1 retry)
-   - 422 unprocessable: updates status to "failed", removes from processing queue
-4. After immediate retries exhausted without success: job moved to payments:delayed with 10s backoff
-5. On max attempts (8): moved to payments:dead, status set to "failed"
+   - 422 unprocessable: updates status to `failed_final`, removes from processing queue
+4. After immediate retries exhausted without success: status changes to `failed_retryable` and the job moves to `payments:delayed` with exponential backoff
+5. On max attempts: moved to `payments:dead`, status set to `failed_final`
 6. Retry worker polls payments:delayed sorted set and requeues jobs whose score (timestamp) is in the past
 7. Reaper polls payments:processing every 10s, requeues anything stuck longer than 1 minute
-8. Graceful shutdown with 10s timeout
+8. Graceful shutdown
 
 ## Data model
  [schema.sql](/Users/ayush/Developer/okane/schema.sql)
@@ -57,7 +57,8 @@ flowchart TD
 - `pending`
 - `processing`
 - `success`
-- `failed`
+- `failed_retryable`
+- `failed_final`
 
 ## API
 
@@ -139,8 +140,8 @@ curl "http://localhost:8080/payments/<payment-id>" | jq
 ```
 
 ## Roadmap
+- [x] exponential backoff
 - [ ] tests
 - [ ] rate limiting
-- [ ] exponential backoff
 - [ ] benchmarking
 - [ ] request validation

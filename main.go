@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -38,6 +39,16 @@ const (
 	serverIdleTimeout     = 60 * time.Second
 	serverShutdownTimeout = 10 * time.Second
 )
+
+const (
+	paymentStatusPending         = "pending"
+	paymentStatusProcessing      = "processing"
+	paymentStatusSuccess         = "success"
+	paymentStatusFailedRetryable = "failed_retryable"
+	paymentStatusFailedFinal     = "failed_final"
+)
+
+var errInvalidStateTransition = errors.New("invalid state transition")
 
 type Payment struct {
 	ID             uuid.UUID `json:"id"`
@@ -87,9 +98,8 @@ func (s *Service) Start(ctx context.Context) error {
 
 func (s *Service) processPayment(ctx context.Context, paymentID string) error {
 	slog.Info("payment processing started", "payment_id", paymentID)
-	s.UpdatePayment(ctx, paymentID, "processing", "", false)
 	success := false
-	unproccessable := false
+	unprocessable := false
 retryLoop:
 	for i := range maxImmediateRetries {
 		slog.Info("calling provider", "payment_id", paymentID, "attempt", i+1)
@@ -110,11 +120,12 @@ retryLoop:
 				ProviderRef string `json:"provider_ref"`
 			}
 			err = json.NewDecoder(resp.Body).Decode(&respStruct)
+			_ = resp.Body.Close()
 			if err != nil {
 				slog.Error("failed to decode provider response", "payment_id", paymentID, "error", err)
 				return err
 			}
-			err = s.UpdatePayment(ctx, paymentID, "success", "", true)
+			err = s.UpdatePayment(ctx, paymentID, paymentStatusProcessing, paymentStatusSuccess, "", true)
 			if err != nil {
 				slog.Error("failed to update payment success state", "payment_id", paymentID, "error", err)
 				return err
@@ -128,29 +139,44 @@ retryLoop:
 			success = true
 			break retryLoop
 		case http.StatusServiceUnavailable:
+			_ = resp.Body.Close()
 			slog.Warn("provider unavailable", "payment_id", paymentID, "attempt", i+1)
-			err = s.UpdatePayment(ctx, paymentID, "processing", "service unavailable", true)
+			err = s.RecordProcessingFailure(ctx, paymentID, "service unavailable", true)
 			if err != nil {
 				slog.Error("failed to update retryable payment state", "payment_id", paymentID, "attempt", i, "error", err)
 				return err
 			}
 		case http.StatusUnprocessableEntity:
+			_ = resp.Body.Close()
 			slog.Warn("payment rejected by provider", "payment_id", paymentID)
-			err = s.UpdatePayment(ctx, paymentID, "failed", "unprocessable payment", false)
+			err = s.UpdatePayment(ctx, paymentID, paymentStatusProcessing, paymentStatusFailedFinal, "unprocessable payment", false)
 			if err != nil {
 				slog.Error("failed to update failed payment state", "payment_id", paymentID, "error", err)
 				return err
 			}
-			unproccessable = true
+			unprocessable = true
 			break retryLoop
+		default:
+			_ = resp.Body.Close()
+			slog.Warn("provider returned unexpected status", "payment_id", paymentID, "status_code", resp.StatusCode)
+			err = s.RecordProcessingFailure(ctx, paymentID, fmt.Sprintf("provider returned status %d", resp.StatusCode), true)
+			if err != nil {
+				return err
+			}
 		}
 	}
 
 	_ = s.rdb.LRem(ctx, "payments:processing", 1, paymentID).Err()
 	_ = s.rdb.HDel(ctx, "payments:processing:times", paymentID).Err()
 
-	if success || unproccessable {
+	if success || unprocessable {
 		return nil
+	}
+
+	err := s.UpdatePayment(ctx, paymentID, paymentStatusProcessing, paymentStatusFailedRetryable, "service unavailable", false)
+	if err != nil {
+		slog.Error("failed to update retryable failure state", "payment_id", paymentID, "error", err)
+		return err
 	}
 
 	payment, err := s.GetPaymentByID(ctx, paymentID)
@@ -199,11 +225,36 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			return err
 		}
 
-		if payment.Status == "success" {
+		if payment.Status == paymentStatusSuccess || payment.Status == paymentStatusFailedFinal {
 			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
 			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
 			continue
 		}
+		if payment.Status == paymentStatusPending {
+			err = s.UpdatePayment(ctx, paymentID, paymentStatusPending, paymentStatusProcessing, "", false)
+			if err != nil {
+				slog.Error("failed to move payment to processing", "payment_id", paymentID, "worker_id", id, "error", err)
+				return err
+			}
+			payment.Status = paymentStatusProcessing
+		}
+
+		if payment.Status == paymentStatusFailedRetryable {
+			err = s.UpdatePayment(ctx, paymentID, paymentStatusFailedRetryable, paymentStatusProcessing, "", false)
+			if err != nil {
+				slog.Error("failed to resume retryable payment", "payment_id", paymentID, "worker_id", id, "error", err)
+				return err
+			}
+			payment.Status = paymentStatusProcessing
+		}
+
+		if payment.Status != paymentStatusProcessing {
+			slog.Warn("skipping payment with non-processable status", "payment_id", paymentID, "worker_id", id, "status", payment.Status)
+			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
+			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
+			continue
+		}
+
 		if payment.Attempts >= maxAttemptsBeforeDLQ {
 			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
 			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
@@ -213,7 +264,7 @@ func (s *Service) Work(ctx context.Context, id int) error {
 				lastError = *payment.LastError
 			}
 
-			err = s.UpdatePayment(ctx, paymentID, "failed", lastError, false)
+			err = s.UpdatePayment(ctx, paymentID, paymentStatusProcessing, paymentStatusFailedFinal, lastError, false)
 			if err != nil {
 				slog.Error("failed to update dead-lettered payment", "payment_id", paymentID, "error", err)
 				return err
@@ -310,27 +361,77 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 			}
 		}
 
-		s.rdb.LPush(ctx, "payments:pending", jobs[0].Member)
-		s.rdb.ZRem(ctx, "payments:delayed", jobs[0].Member)
-		slog.Info("retry worker requeued payment", "payment_id", jobs[0].Member)
+		paymentID, ok := jobs[0].Member.(string)
+		if !ok {
+			slog.Error("retry worker received non-string payment id", "member", jobs[0].Member)
+			s.rdb.ZRem(ctx, "payments:delayed", jobs[0].Member)
+			continue
+		}
+
+		payment, err := s.GetPaymentByID(ctx, paymentID)
+		if err != nil {
+			slog.Error("retry worker failed to load payment", "payment_id", paymentID, "error", err)
+			continue
+		}
+		if payment.Status != paymentStatusFailedRetryable {
+			slog.Warn("retry worker dropping non-retryable payment", "payment_id", paymentID, "status", payment.Status)
+			s.rdb.ZRem(ctx, "payments:delayed", paymentID)
+			continue
+		}
+
+		s.rdb.LPush(ctx, "payments:pending", paymentID)
+		s.rdb.ZRem(ctx, "payments:delayed", paymentID)
+		slog.Info("retry worker requeued payment", "payment_id", paymentID)
 	}
 }
 
-func (s *Service) UpdatePayment(ctx context.Context, id, status, lastError string, incrementAttempts bool) error {
+func (s *Service) UpdatePayment(ctx context.Context, id, fromStatus, toStatus, lastError string, incrementAttempts bool) error {
 	query := `
 		update payments
 		set status = $1,
 			last_error = $2,
 			attempts = attempts + $3,
 			updated_at = now()
-		where id = $4`
+		where id = $4
+		  and status = $5`
 
 	attemptDelta := 0
 	if incrementAttempts {
 		attemptDelta = 1
 	}
 
-	_, err := s.db.Exec(ctx, query, status, lastError, attemptDelta, id)
+	tag, err := s.db.Exec(ctx, query, toStatus, nullableText(lastError), attemptDelta, id, fromStatus)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: %s -> %s for payment %s", errInvalidStateTransition, fromStatus, toStatus, id)
+	}
+
+	return nil
+}
+
+func (s *Service) RecordProcessingFailure(ctx context.Context, id, lastError string, incrementAttempts bool) error {
+	query := `
+		update payments
+		set last_error = $1,
+			attempts = attempts + $2,
+			updated_at = now()
+		where id = $3
+		  and status = $4`
+
+	attemptDelta := 0
+	if incrementAttempts {
+		attemptDelta = 1
+	}
+
+	tag, err := s.db.Exec(ctx, query, nullableText(lastError), attemptDelta, id, paymentStatusProcessing)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: expected %s for payment %s", errInvalidStateTransition, paymentStatusProcessing, id)
+	}
 
 	return err
 }
@@ -340,11 +441,25 @@ func (s *Service) UpdateProviderRef(ctx context.Context, id, providerRef string)
 		update payments
 		set provider_ref = $1,
 			updated_at = now()
-		where id = $2`
+		where id = $2
+		  and status = $3`
 
-	_, err := s.db.Exec(ctx, query, providerRef, id)
+	tag, err := s.db.Exec(ctx, query, providerRef, id, paymentStatusSuccess)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: expected %s before provider ref update for payment %s", errInvalidStateTransition, paymentStatusSuccess, id)
+	}
 
 	return err
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }
 
 func (s *Service) GetPaymentByID(ctx context.Context, id string) (Payment, error) {
@@ -450,7 +565,7 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 
 	payment, err := h.svc.CreatePayment(ctx, CreatePaymentParams{
 		Amount:         recPayment.Amount,
-		Status:         "pending",
+		Status:         paymentStatusPending,
 		IdempotencyKey: recPayment.IdempotencyKey,
 	})
 
