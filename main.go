@@ -29,10 +29,12 @@ const (
 	maxBackoff           = 30 * time.Minute
 	workerCount          = 5
 
-	queueBlockTimeout     = 1 * time.Second
-	reaperInterval        = 10 * time.Second
-	processingTimeout     = 1 * time.Minute
-	retryWorkerPollPeriod = 1 * time.Second
+	queueBlockTimeout          = 1 * time.Second
+	reaperInterval             = 10 * time.Second
+	processingTimeout          = 1 * time.Minute
+	paymentProcessingTimeout   = 30 * time.Second
+	retryWorkerPollPeriod      = 1 * time.Second
+	retryWorkerMaxPollInterval = 30 * time.Second
 
 	serverReadTimeout     = 5 * time.Second
 	serverWriteTimeout    = 10 * time.Second
@@ -184,7 +186,7 @@ retryLoop:
 		slog.Error("payment process error", "error", err)
 		return err
 	}
-	backoff := time.Minute << time.Duration(payment.Attempts)
+	backoff := time.Minute << payment.Attempts
 	backoff = min(backoff, maxBackoff)
 
 	retryAt := time.Now().Add(backoff).Unix()
@@ -272,8 +274,10 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			slog.Warn("payment moved to dead queue", "payment_id", paymentID, "attempts", payment.Attempts)
 			continue
 		}
+		paymentCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), paymentProcessingTimeout)
+		defer cancel()
 
-		err = s.processPayment(context.WithoutCancel(ctx), paymentID)
+		err = s.processPayment(paymentCtx, paymentID)
 		if err != nil {
 			slog.Error("failed to process payment", "payment_id", paymentID, "worker_id", id, "error", err)
 			return err
@@ -352,9 +356,10 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 			}
 		}
 		now := float64(time.Now().Unix())
+
 		if jobs[0].Score > now {
 			select {
-			case <-time.After(time.Duration(jobs[0].Score-now) * time.Second):
+			case <-time.After(min(time.Duration(jobs[0].Score-now)*time.Second, retryWorkerMaxPollInterval)):
 				continue
 			case <-ctx.Done():
 				return err
