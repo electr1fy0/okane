@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -29,7 +28,7 @@ const (
 	delayedRetryBackoff  = 10 * time.Second
 	workerCount          = 5
 
-	queuePollTimeout      = 1 * time.Second
+	queueBlockTimeout     = 1 * time.Second
 	reaperInterval        = 10 * time.Second
 	processingTimeout     = 1 * time.Minute
 	retryWorkerPollPeriod = 1 * time.Second
@@ -167,7 +166,7 @@ retryLoop:
 
 func (s *Service) Work(ctx context.Context, id int) error {
 	for {
-		paymentID, err := s.rdb.BLMove(ctx, "payments:pending", "payments:processing", "RIGHT", "LEFT", queuePollTimeout).Result()
+		paymentID, err := s.rdb.BLMove(ctx, "payments:pending", "payments:processing", "RIGHT", "LEFT", queueBlockTimeout).Result()
 
 		if err != nil {
 			if ctx.Err() != nil {
@@ -191,6 +190,12 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			slog.Error("failed to load payment", "payment_id", paymentID, "worker_id", id, "error", err)
 			return err
 		}
+
+		if payment.Status == "success" {
+			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
+			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
+			continue
+		}
 		if payment.Attempts >= maxAttemptsBeforeDLQ {
 			s.rdb.LRem(ctx, "payments:processing", 1, paymentID)
 			s.rdb.HDel(ctx, "payments:processing:times", paymentID)
@@ -199,13 +204,13 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			if payment.LastError != nil {
 				lastError = *payment.LastError
 			}
+
 			err = s.UpdatePayment(ctx, paymentID, "failed", lastError, false)
 			if err != nil {
 				slog.Error("failed to update dead-lettered payment", "payment_id", paymentID, "error", err)
 				return err
 			}
 			slog.Warn("payment moved to dead queue", "payment_id", paymentID, "attempts", payment.Attempts)
-
 			continue
 		}
 
@@ -578,12 +583,10 @@ func main() {
 
 	g.Go(func() error {
 		<-sigCtx.Done()
-		fmt.Print("sigctx done")
 		shutDownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
 		defer cancel()
 
 		err = server.Shutdown(shutDownCtx)
-		fmt.Println(err)
 		return err
 	})
 	if err := g.Wait(); err != nil {

@@ -18,7 +18,7 @@ flowchart TD
     WorkerPool -->|provider call| Provider["Mock Provider"]
     WorkerPool -->|success/failed| PG
     WorkerPool -->|retryable failure| Delayed["payments:delayed"]
-    WorkerPool -->|attempts >= 8| Dead["payments:dead"]
+    WorkerPool -->|attempts >= n| Dead["payments:dead"]
 
     Delayed -->|poll due jobs| Retry["Retry Worker"]
     Retry -->|LPUSH| Pending
