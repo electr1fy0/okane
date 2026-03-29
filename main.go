@@ -25,7 +25,7 @@ import (
 const (
 	maxImmediateRetries  = 1
 	maxAttemptsBeforeDLQ = 8
-	delayedRetryBackoff  = 10 * time.Second
+	maxBackoff           = 30 * time.Minute
 	workerCount          = 5
 
 	queueBlockTimeout     = 1 * time.Second
@@ -153,7 +153,15 @@ retryLoop:
 		return nil
 	}
 
-	retryAt := time.Now().Add(delayedRetryBackoff).Unix()
+	payment, err := s.GetPaymentByID(ctx, paymentID)
+	if err != nil {
+		slog.Error("payment process error", "error", err)
+		return err
+	}
+	backoff := time.Minute << time.Duration(payment.Attempts)
+	backoff = min(backoff, maxBackoff)
+
+	retryAt := time.Now().Add(backoff).Unix()
 
 	s.rdb.ZAdd(ctx, "payments:delayed", redis.Z{
 		Score:  float64(retryAt),
