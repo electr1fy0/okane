@@ -32,14 +32,14 @@ const (
 	queueBlockTimeout          = 1 * time.Second
 	reaperInterval             = 10 * time.Second
 	processingTimeout          = 1 * time.Minute
-	paymentProcessingTimeout   = 30 * time.Second
+	paymentProcessingTimeout   = 5 * time.Second
 	retryWorkerPollPeriod      = 1 * time.Second
 	retryWorkerMaxPollInterval = 30 * time.Second
 
 	serverReadTimeout     = 5 * time.Second
 	serverWriteTimeout    = 10 * time.Second
 	serverIdleTimeout     = 60 * time.Second
-	serverShutdownTimeout = 10 * time.Second
+	serverShutdownTimeout = 30 * time.Second
 )
 
 const (
@@ -275,9 +275,9 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			continue
 		}
 		paymentCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), paymentProcessingTimeout)
-		defer cancel()
-
 		err = s.processPayment(paymentCtx, paymentID)
+		cancel()
+
 		if err != nil {
 			slog.Error("failed to process payment", "payment_id", paymentID, "worker_id", id, "error", err)
 			return err
