@@ -8,6 +8,7 @@ import (
 	"github.com/electr1fy0/okane/internal/types"
 	"github.com/electr1fy0/okane/internal/utils"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -47,7 +48,7 @@ func (s *PostgresStore) RecordProcessingFailure(ctx context.Context, id, lastErr
 	return nil
 }
 
-func (s *PostgresStore) UpdatePayment(ctx context.Context, id, fromStatus, toStatus, lastError string, incrementAttempts bool) error {
+func (s *PostgresStore) UpdatePayment(ctx context.Context, id, fromStatus, toStatus, lastError string, incrementAttempts bool) (Payment, error) {
 	query := `
 		update payments
 		set status = $1,
@@ -55,22 +56,34 @@ func (s *PostgresStore) UpdatePayment(ctx context.Context, id, fromStatus, toSta
 			attempts = attempts + $3,
 			updated_at = now()
 		where id = $4
-		  and status = $5`
+		  and status = $5
+		returning id, amount, status, idempotency_key, provider_ref, attempts, last_error, created_at, updated_at`
 
 	attemptDelta := 0
 	if incrementAttempts {
 		attemptDelta = 1
 	}
 
-	tag, err := s.db.Exec(ctx, query, toStatus, utils.NullableText(lastError), attemptDelta, id, fromStatus)
+	payment := Payment{}
+	err := s.db.QueryRow(ctx, query, toStatus, utils.NullableText(lastError), attemptDelta, id, fromStatus).Scan(
+		&payment.ID,
+		&payment.Amount,
+		&payment.Status,
+		&payment.IdempotencyKey,
+		&payment.ProviderRef,
+		&payment.Attempts,
+		&payment.LastError,
+		&payment.CreatedAt,
+		&payment.UpdatedAt,
+	)
 	if err != nil {
-		return err
-	}
-	if tag.RowsAffected() == 0 {
-		return fmt.Errorf("%w: %s -> %s for payment %s", errInvalidStateTransition, fromStatus, toStatus, id)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return Payment{}, fmt.Errorf("%w: %s -> %s for payment %s", errInvalidStateTransition, fromStatus, toStatus, id)
+		}
+		return Payment{}, err
 	}
 
-	return nil
+	return payment, nil
 }
 
 func (s *PostgresStore) UpdateProviderRef(ctx context.Context, id, providerRef string) error {

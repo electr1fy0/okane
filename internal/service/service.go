@@ -11,7 +11,6 @@ import (
 	"github.com/electr1fy0/okane/internal/queue"
 	"github.com/electr1fy0/okane/internal/store"
 	"github.com/electr1fy0/okane/internal/types"
-	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -36,11 +35,6 @@ type Service struct {
 	workers        int
 }
 
-type ProviderClient struct {
-	baseURL string
-	http    *http.Client
-}
-
 func New(paymentStore store.Store, paymentQueue queue.Queue, providerClient *ProviderClient, workers int) *Service {
 	return &Service{
 		store:          paymentStore,
@@ -49,14 +43,6 @@ func New(paymentStore store.Store, paymentQueue queue.Queue, providerClient *Pro
 		workers:        workers,
 	}
 }
-
-func NewProviderClient(baseURL string, client *http.Client) *ProviderClient {
-	return &ProviderClient{
-		baseURL: baseURL,
-		http:    client,
-	}
-}
-
 func (s *Service) Start(ctx context.Context) error {
 	g, ctx := errgroup.WithContext(ctx)
 	slog.Info("starting workers", "count", s.workers)
@@ -82,6 +68,28 @@ func (s *Service) GetPaymentByID(ctx context.Context, id string) (store.Payment,
 	return s.store.GetPaymentByID(ctx, id)
 }
 
+func (c *ProviderClient) executePayment(ctx context.Context) (string, int, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL, nil)
+	if err != nil {
+		return "", -1, err
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", -1, err
+	}
+	defer resp.Body.Close()
+
+	var respStruct struct {
+		ProviderRef string `json:"provider_ref"`
+	}
+	// assuming that the resp body is not malformed and will just ignore
+	// the err in case of empty body for other status codes
+	_ = json.NewDecoder(resp.Body).Decode(&respStruct)
+
+	return respStruct.ProviderRef, resp.StatusCode, err
+
+}
+
 func (s *Service) processPayment(ctx context.Context, paymentID string) error {
 	slog.Info("payment processing started", "payment_id", paymentID)
 	success := false
@@ -90,43 +98,28 @@ func (s *Service) processPayment(ctx context.Context, paymentID string) error {
 retryLoop:
 	for i := range MaxImmediateRetries {
 		slog.Info("calling provider", "payment_id", paymentID, "attempt", i+1)
-
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.providerClient.baseURL, nil)
-		if err != nil {
-			return err
-		}
-		resp, err := s.providerClient.http.Do(req)
+		providerRef, status, err := s.providerClient.executePayment(ctx)
 		if err != nil {
 			slog.Error("failed to request payment provider", "error", err)
 			continue
 		}
 
-		switch resp.StatusCode {
+		switch status {
 		case http.StatusOK:
-			var respStruct struct {
-				ProviderRef string `json:"provider_ref"`
-			}
-			err = json.NewDecoder(resp.Body).Decode(&respStruct)
-			_ = resp.Body.Close()
-			if err != nil {
-				slog.Error("failed to decode provider response", "payment_id", paymentID, "error", err)
-				return err
-			}
-			err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusSuccess, "", true)
+			_, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusSuccess, "", true)
 			if err != nil {
 				slog.Error("failed to update payment success state", "payment_id", paymentID, "error", err)
 				return err
 			}
-			err = s.store.UpdateProviderRef(ctx, paymentID, respStruct.ProviderRef)
+			err = s.store.UpdateProviderRef(ctx, paymentID, providerRef)
 			if err != nil {
 				slog.Error("failed to update provider ref", "payment_id", paymentID, "error", err)
 				return err
 			}
-			slog.Info("payment succeeded", "payment_id", paymentID, "provider_ref", respStruct.ProviderRef)
+			slog.Info("payment succeeded", "payment_id", paymentID, "provider_ref", providerRef)
 			success = true
 			break retryLoop
 		case http.StatusServiceUnavailable:
-			_ = resp.Body.Close()
 			slog.Warn("provider unavailable", "payment_id", paymentID, "attempt", i+1)
 			err = s.store.RecordProcessingFailure(ctx, paymentID, "service unavailable", true)
 			if err != nil {
@@ -134,9 +127,8 @@ retryLoop:
 				return err
 			}
 		case http.StatusUnprocessableEntity:
-			_ = resp.Body.Close()
 			slog.Warn("payment rejected by provider", "payment_id", paymentID)
-			err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedFinal, "unprocessable payment", false)
+			_, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedFinal, "unprocessable payment", false)
 			if err != nil {
 				slog.Error("failed to update failed payment state", "payment_id", paymentID, "error", err)
 				return err
@@ -144,9 +136,8 @@ retryLoop:
 			unprocessable = true
 			break retryLoop
 		default:
-			_ = resp.Body.Close()
-			slog.Warn("provider returned unexpected status", "payment_id", paymentID, "status_code", resp.StatusCode)
-			err = s.store.RecordProcessingFailure(ctx, paymentID, fmt.Sprintf("provider returned status %d", resp.StatusCode), true)
+			slog.Warn("provider returned unexpected status", "payment_id", paymentID, "status_code", status)
+			err = s.store.RecordProcessingFailure(ctx, paymentID, fmt.Sprintf("provider returned status %d", status), true)
 			if err != nil {
 				return err
 			}
@@ -159,18 +150,17 @@ retryLoop:
 		return nil
 	}
 
-	err := s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedRetryable, "service unavailable", false)
+	payment, err := s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedRetryable, "service unavailable", false)
 	if err != nil {
 		slog.Error("failed to update retryable failure state", "payment_id", paymentID, "error", err)
 		return err
 	}
 
-	payment, err := s.store.GetPaymentByID(ctx, paymentID)
-	if err != nil {
-		slog.Error("payment process error", "error", err)
-		return err
-	}
-	backoff := 5 * time.Second << payment.Attempts
+	return s.addToRetryLater(ctx, paymentID, payment.Attempts)
+}
+
+func (s *Service) addToRetryLater(ctx context.Context, paymentID string, attempts int) error {
+	backoff := 5 * time.Second << attempts
 	backoff = min(backoff, MaxBackoff)
 
 	retryAt := time.Now().Add(backoff)
@@ -178,21 +168,24 @@ retryLoop:
 		return err
 	}
 	slog.Info("payment scheduled for retry", "payment_id", paymentID, "retry_at_unix", retryAt.Unix())
-
 	return nil
+}
+
+func (s *Service) claimNextPayment(ctx context.Context) (string, error) {
+	return s.queue.MovePendingToProcessing(ctx, QueueBlockTimeout)
 }
 
 func (s *Service) Work(ctx context.Context, id int) error {
 	for {
-		paymentID, err := s.queue.MovePendingToProcessing(ctx, QueueBlockTimeout)
+		paymentID, err := s.claimNextPayment(ctx)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
 			}
-			if err == redis.Nil {
-				continue
-			}
 			return err
+		}
+		if paymentID == "" {
+			continue
 		}
 
 		err = s.queue.MarkProcessing(ctx, paymentID, time.Now())
@@ -213,21 +206,19 @@ func (s *Service) Work(ctx context.Context, id int) error {
 			continue
 		}
 		if payment.Status == types.PaymentStatusPending {
-			err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusPending, types.PaymentStatusProcessing, "", false)
+			payment, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusPending, types.PaymentStatusProcessing, "", false)
 			if err != nil {
 				slog.Error("failed to move payment to processing", "payment_id", paymentID, "worker_id", id, "error", err)
 				return err
 			}
-			payment.Status = types.PaymentStatusProcessing
 		}
 
 		if payment.Status == types.PaymentStatusFailedRetryable {
-			err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusFailedRetryable, types.PaymentStatusProcessing, "", false)
+			payment, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusFailedRetryable, types.PaymentStatusProcessing, "", false)
 			if err != nil {
 				slog.Error("failed to resume retryable payment", "payment_id", paymentID, "worker_id", id, "error", err)
 				return err
 			}
-			payment.Status = types.PaymentStatusProcessing
 		}
 
 		if payment.Status != types.PaymentStatusProcessing {
@@ -244,7 +235,7 @@ func (s *Service) Work(ctx context.Context, id int) error {
 				lastError = *payment.LastError
 			}
 
-			err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedFinal, lastError, false)
+			_, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedFinal, lastError, false)
 			if err != nil {
 				slog.Error("failed to update dead-lettered payment", "payment_id", paymentID, "error", err)
 				return err

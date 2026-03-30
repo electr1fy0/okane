@@ -1,4 +1,4 @@
-package redis
+package queue
 
 import (
 	"context"
@@ -29,7 +29,11 @@ func (q *RedisQueue) EnqueuePending(ctx context.Context, paymentID string) error
 }
 
 func (q *RedisQueue) MovePendingToProcessing(ctx context.Context, timeout time.Duration) (string, error) {
-	return q.client.BLMove(ctx, pendingKey, processingKey, "RIGHT", "LEFT", timeout).Result()
+	paymentID, err := q.client.BLMove(ctx, pendingKey, processingKey, "RIGHT", "LEFT", timeout).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return paymentID, err
 }
 
 func (q *RedisQueue) MarkProcessing(ctx context.Context, paymentID string, startedAt time.Time) error {

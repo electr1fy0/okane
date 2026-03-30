@@ -29,7 +29,7 @@ type Store interface {
 	CreatePayment(ctx context.Context, params CreatePaymentParams) (*Payment, bool, error)
 	GetPaymentByID(ctx context.Context, id string) (Payment, error)
 	GetPaymentByIdempotencyKey(ctx context.Context, key string) (Payment, error)
-	UpdatePayment(ctx context.Context, id, fromStatus, toStatus, lastError string, incrementAttempts bool) error
+	UpdatePayment(ctx context.Context, id, fromStatus, toStatus, lastError string, incrementAttempts bool) (Payment, error)
 	UpdateProviderRef(ctx context.Context, id, providerRef string) error
 	RecordProcessingFailure(ctx context.Context, id, lastError string, incrementAttempts bool) error
 }
