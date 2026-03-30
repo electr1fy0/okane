@@ -1,2 +1,3 @@
 .env
 main_bench_test.go
+main_test.go
