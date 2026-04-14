@@ -75,7 +75,7 @@ func main() {
 	h := handler.New(svc)
 
 	r := http.NewServeMux()
-	r.HandleFunc("/payments", h.CreatePayment)
+	r.HandleFunc("POST /payments", h.CreatePayment)
 	r.HandleFunc("GET /payments/{id}", h.GetPaymentID)
 
 	server := &http.Server{

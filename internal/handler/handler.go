@@ -3,11 +3,13 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 
 	"github.com/electr1fy0/okane/internal/store"
 	"github.com/electr1fy0/okane/internal/types"
+	"github.com/jackc/pgx/v5"
 )
 
 type CreatePaymentResponse struct {
@@ -98,6 +100,10 @@ func (h *APIHandler) GetPaymentID(w http.ResponseWriter, r *http.Request) {
 
 	payment, err := h.svc.GetPaymentByID(r.Context(), id)
 	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			http.Error(w, "payment not found", http.StatusNotFound)
+			return
+		}
 		slog.Error("failed to get payment", "payment_id", id, "error", err)
 		http.Error(w, "failed to get payment", http.StatusInternalServerError)
 		return
