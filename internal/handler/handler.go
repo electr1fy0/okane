@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -45,6 +46,10 @@ func writeJSON(w http.ResponseWriter, data any, statusCode int) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(data)
+}
+
+func (h *APIHandler) Health(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "don't worry about me, mate")
 }
 
 func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {

@@ -1,0 +1,45 @@
+services:
+  db:
+    image: postgres
+    environment:
+      POSTGRES_USER: okanedbuser
+      POSTGRES_PASSWORD: okanedbpass
+      POSTGRES_DB: okanedb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U okanedbuser -d okanedb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  server:
+    build:
+      context: .
+      dockerfile: cmd/okane/Dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      provider:
+        condition: service_healthy
+    environment:
+      PROVIDER_BASE_URL: http://provider:3000
+      DATABASE_URL: postgres://okanedbuser:okanedbpass@db:5432/okanedb
+      REDIS_ADDR: redis:6379
+
+  provider:
+    build:
+      context: .
+      dockerfile: cmd/mockprovider/Dockerfile
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]

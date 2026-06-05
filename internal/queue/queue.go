@@ -11,10 +11,13 @@ type DelayedJob struct {
 }
 
 type Queue interface {
+	Ping(ctx context.Context) error
 	EnqueuePending(ctx context.Context, paymentID string) error
 	MovePendingToProcessing(ctx context.Context, timeout time.Duration) (string, error)
 	MarkProcessing(ctx context.Context, paymentID string, startedAt time.Time) error
 	RemoveProcessing(ctx context.Context, paymentID string) error
+	// ListProcessing returns up to limit items from the processing list.
+	// Pass limit=0 to return all items.
 	ListProcessing(ctx context.Context, limit int64) ([]string, error)
 	GetProcessingTime(ctx context.Context, paymentID string) (time.Time, bool, error)
 	EnqueueDelayed(ctx context.Context, paymentID string, runAt time.Time) error

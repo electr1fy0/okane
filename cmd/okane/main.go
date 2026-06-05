@@ -77,6 +77,7 @@ func main() {
 	r := http.NewServeMux()
 	r.HandleFunc("POST /payments", h.CreatePayment)
 	r.HandleFunc("GET /payments/{id}", h.GetPaymentID)
+	r.HandleFunc("GET /health", h.Health)
 
 	server := &http.Server{
 		Addr:    addr,

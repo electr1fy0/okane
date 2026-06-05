@@ -153,6 +153,7 @@ curl "http://localhost:8080/payments/<payment-id>" | jq
 
 ## Roadmap
 - [x] exponential backoff
+- [x] dockerize okane
 - [ ] tests
 - [ ] rate limiting
 - [ ] benchmarking

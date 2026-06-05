@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"math/rand"
 	"net/http"
@@ -31,6 +32,10 @@ func (m *MockProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (m *MockProvider) Health(w http.ResponseWriter, r *http.Request) {
+	fmt.Fprintf(w, "don't worry about me, mate")
+}
+
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
@@ -44,6 +49,7 @@ func main() {
 
 	m := MockProvider{}
 	http.HandleFunc("/", m.ServeHTTP)
+	http.HandleFunc("/health", m.Health)
 	slog.Info("starting mock provider server", "port", port)
 	if err := http.ListenAndServe(":"+port, nil); err != nil {
 		slog.Error("server failed", "error", err)

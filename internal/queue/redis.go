@@ -24,6 +24,10 @@ func NewRedis(client *redis.Client) *RedisQueue {
 	return &RedisQueue{client: client}
 }
 
+func (q *RedisQueue) Ping(ctx context.Context) error {
+	return q.client.Ping(ctx).Err()
+}
+
 func (q *RedisQueue) EnqueuePending(ctx context.Context, paymentID string) error {
 	return q.client.LPush(ctx, pendingKey, paymentID).Err()
 }
