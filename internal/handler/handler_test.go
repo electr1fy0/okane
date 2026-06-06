@@ -12,7 +12,6 @@ import (
 
 	"github.com/electr1fy0/okane/internal/store"
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -80,7 +79,7 @@ func TestCreatePaymentAcceptedAndEnqueued(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 
-	handler.CreatePayment(rr, req)
+	Handle(handler.CreatePayment)(rr, req)
 	assert.Equal(t, http.StatusAccepted, rr.Code, "body=%s", rr.Body.String())
 
 	assert.Equal(t, int64(440), gotParams.Amount)
@@ -101,21 +100,23 @@ func TestCreatePaymentRejectsInvalidJSON(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{"amount":`))
 	rr := httptest.NewRecorder()
 
-	handler.CreatePayment(rr, req)
+	Handle(handler.CreatePayment)(rr, req)
 
 	assert.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", rr.Body.String())
 
 	req = httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{"amount": 0, "idempotency_key":"key"}`))
+	rr = httptest.NewRecorder()
 
-	handler.CreatePayment(rr, req)
+	Handle(handler.CreatePayment)(rr, req)
 	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 func TestCreatePaymentRejectsDuplicateIdempotencyKey(t *testing.T) {
+	payment := testPayment()
 	handler := &APIHandler{
 		svc: fakePaymentAPI{
 			createPaymentFn: func(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error) {
-				return nil, false, &pgconn.PgError{Code: "23505"}
+				return &payment, false, nil
 			},
 			enqueuePaymentFn: func(ctx context.Context, paymentID string) error {
 				assert.Fail(t, "enqueue should not be called for duplicate idempotency key")
@@ -128,7 +129,7 @@ func TestCreatePaymentRejectsDuplicateIdempotencyKey(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	rr := httptest.NewRecorder()
 
-	handler.CreatePayment(rr, req)
+	Handle(handler.CreatePayment)(rr, req)
 
 	assert.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
 }
@@ -149,7 +150,7 @@ func TestGetPaymentByIDReturnsPayment(t *testing.T) {
 	req.SetPathValue("id", payment.ID.String())
 	rr := httptest.NewRecorder()
 
-	handler.GetPaymentID(rr, req)
+	Handle(handler.GetPaymentID)(rr, req)
 
 	assert.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
 

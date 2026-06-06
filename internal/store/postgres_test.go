@@ -19,8 +19,14 @@ func setupTestDB(t *testing.T) (*pgxpool.Pool, func()) {
 	}
 
 	pool, err := pgxpool.New(ctx, dbURL)
-
 	require.NoError(t, err)
+
+	// read and apply schema.sql
+	schemaBytes, err := os.ReadFile("../../schema.sql")
+	require.NoError(t, err, "failed to read schema.sql: %v", err)
+
+	_, err = pool.Exec(ctx, string(schemaBytes))
+	require.NoError(t, err, "failed to apply schema: %v", err)
 
 	// clean slate everytime
 	_, err = pool.Exec(ctx, "truncate table payments cascade;")

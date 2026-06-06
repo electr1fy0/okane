@@ -1,4 +1,4 @@
-create table payments (
+create table if not exists payments (
     id  uuid primary key default gen_random_uuid(),
     amount BIGINT NOT NULL,
     status text not null check (status in ('pending', 'processing', 'success', 'failed_retryable', 'failed_final')),
@@ -10,4 +10,4 @@ create table payments (
     updated_at timestamptz default now()
 );
 
-create index idx_payments on payments(status);
+create index if not exists idx_payments on payments(status);

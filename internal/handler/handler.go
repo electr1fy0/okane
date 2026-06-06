@@ -51,23 +51,58 @@ func writeJSON(w http.ResponseWriter, data any, statusCode int) {
 	_ = json.NewEncoder(w).Encode(data)
 }
 
+type HttpError struct {
+	status  int
+	message string
+	err     error
+}
+
+func (h *HttpError) Error() string {
+	return h.message
+}
+
 func (h *APIHandler) Health(w http.ResponseWriter, r *http.Request) {
 	fmt.Fprintf(w, "don't worry about me, mate")
 }
 
-func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
+func HttpErrorResponse(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	var httpError *HttpError
+	if ok := errors.As(err, &httpError); ok {
+		slog.Error(httpError.Error(), "error", err)
+		http.Error(w, httpError.Error(), httpError.status)
+		return
+	}
+
+	slog.Error(httpError.Error(), "error", err)
+	http.Error(w, err.Error(), http.StatusInternalServerError)
+}
+
+func Handle(fn func(http.ResponseWriter, *http.Request) error) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		HttpErrorResponse(w, fn(w, r))
+	}
+}
+
+func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) error {
 	ctx := r.Context()
 
 	var req createPaymentRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		slog.Error("failed to decode create payment request", "error", err)
-		http.Error(w, "failed to decode the payment", http.StatusBadRequest)
-		return
+		return &HttpError{
+			status:  http.StatusBadRequest,
+			message: "failed to decode create payment request",
+			err:     err,
+		}
 	}
 	if err := validate.Struct(req); err != nil {
-		slog.Error("validation failed", "error", err)
-		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
-		return
+		return &HttpError{
+			status:  http.StatusBadRequest,
+			message: "validation failed, invalid request body" + err.Error(),
+			err:     err,
+		}
 	}
 
 	payment, created, err := h.svc.CreatePayment(ctx, store.CreatePaymentParams{
@@ -77,24 +112,29 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	})
 
 	if err != nil {
-		slog.Error("failed to create payment", "idempotency_key", req.IdempotencyKey, "error", err)
-		http.Error(w, "payment already exists", http.StatusOK)
-		return
+		return &HttpError{
+			status:  http.StatusInternalServerError,
+			message: "failed to create payment: " + err.Error(),
+			err:     err,
+		}
 	}
 
 	if !created {
+		slog.Info("payment already exists", "idempotency_key", payment.IdempotencyKey)
 		writeJSON(w, CreatePaymentResponse{
 			Payment:  *payment,
 			Created:  false,
 			Enqueued: false,
 		}, http.StatusOK)
-		return
+		return nil
 	}
 
 	if err := h.svc.EnqueuePayment(ctx, payment.ID.String()); err != nil {
-		slog.Error("failed to enqueue payment", "payment_id", payment.ID, "error", err)
-		http.Error(w, "failed to enqueue payment", http.StatusInternalServerError)
-		return
+		return &HttpError{
+			status:  http.StatusInternalServerError,
+			message: "failed to enqueue payment: " + err.Error(),
+			err:     err,
+		}
 	}
 
 	writeJSON(w, CreatePaymentResponse{
@@ -102,27 +142,40 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 		Created:  true,
 		Enqueued: true,
 	}, http.StatusAccepted)
+
+	return nil
 }
 
-func (h *APIHandler) GetPaymentID(w http.ResponseWriter, r *http.Request) {
+func (h *APIHandler) GetPaymentID(w http.ResponseWriter, r *http.Request) error {
 	id := r.PathValue("id")
 	if id == "" {
-		http.Error(w, "failed to get payment id", http.StatusBadRequest)
-		return
+		return &HttpError{
+			status:  http.StatusBadRequest,
+			message: "failed to get payment id in req",
+			err:     fmt.Errorf("pathvalue id is empty"),
+		}
 	}
 
 	payment, err := h.svc.GetPaymentByID(r.Context(), id)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			http.Error(w, "payment not found", http.StatusNotFound)
-			return
+			return &HttpError{
+				status:  http.StatusNotFound,
+				message: "payment not found",
+				err:     err,
+			}
 		}
 		slog.Error("failed to get payment", "payment_id", id, "error", err)
 		http.Error(w, "failed to get payment", http.StatusInternalServerError)
-		return
+		return &HttpError{
+			status:  http.StatusInternalServerError,
+			message: "failed to get payment",
+			err:     err,
+		}
 	}
 
 	writeJSON(w, GetPaymentResponse{
 		Payment: payment,
 	}, http.StatusOK)
+	return nil
 }
