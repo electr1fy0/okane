@@ -1,6 +1,20 @@
 # okane
 
-Asynchronous payment pipeline in Go with Postgres state, a pluggable queue layer backed by Redis, and a mock provider.
+An asynchronous payment pipeline in Go backed by PostgreSQL and Redis.
+
+## Features
+
+- **Asynchronous Processing**: Decouples payment creation from client requests via Redis lists.
+- **Reliable Queuing**: Uses atomic operations to move jobs safely from pending to processing.
+- **Idempotency Guard**: Checks for existing idempotency keys in Postgres to prevent double-processing or duplicate enqueuing.
+- **Retries & Backoff**: Supports immediate retries for transient provider errors and transitions to an exponential backoff delayed queue.
+- **Stale Job Reclamation**: A background reaper worker monitors the processing queue and requeues stuck jobs.
+- **Rate Limiting**: Sliding-window rate limiter using Redis sorted sets.
+- **Validation & Standardized Errors**: Struct validation for payment payloads (amount and idempotency keys) and global error handling.
+- **Graceful Shutdown**: Uses `errgroup` and signal context to drain HTTP connections and finish in-flight worker queue tasks on SIGINT/SIGTERM.
+- **CI Pipeline**: GitHub Actions workflow running tests against a live PostgreSQL container.
+
+---
 
 ## Architecture
 
@@ -26,63 +40,78 @@ flowchart TD
 
     Processing -->|scan stale jobs| Reaper["Reaper Worker"]
     Reaper -->|LPUSH| Pending
-  ```
+```
 
-## Package layout
+### Queue Workflow
 
-- [cmd/okane/main.go](/Users/ayush/Developer/okane/cmd/okane/main.go): application bootstrap and wiring
-- [cmd/mockprovider/main.go](/Users/ayush/Developer/okane/cmd/mockprovider/main.go): mock payment provider
-- [internal/handler/handler.go](/Users/ayush/Developer/okane/internal/handler/handler.go): HTTP handlers
-- [internal/service/service.go](/Users/ayush/Developer/okane/internal/service/service.go): payment workflow and workers
-- [internal/store/store.go](/Users/ayush/Developer/okane/internal/store/store.go): payment store contract
-- [internal/store/db/db.go](/Users/ayush/Developer/okane/internal/store/db/db.go): Postgres-backed store
-- [internal/queue/queue.go](/Users/ayush/Developer/okane/internal/queue/queue.go): queue contract
-- [internal/queue/redis.go](/Users/ayush/Developer/okane/internal/queue/redis.go): Redis-backed queue
+1. **API Server**: Validates payload, inserts payment as `pending` to Postgres (handling idempotency keys), and pushes the payment ID to Redis `payments:pending`.
+2. **Worker Pool**: Atomically shifts jobs from pending to `payments:processing` (via `BLMOVE`).
+3. **Provider Call**: Requests external mock provider.
+   - **Success (200)**: Updates Postgres status to `success` and drops the job from processing.
+   - **Transient Error (503)**: Performs an immediate retry. If it fails again, marks as `failed_retryable` and shifts to `payments:delayed` with exponential backoff.
+   - **Terminal Error (422)**: Marks status as `failed_final` and drops the job from processing.
+4. **Retry Worker**: Polls the delayed queue and pushes ready jobs back to pending.
+5. **Reaper Worker**: Runs every 10s to requeue jobs stuck in `payments:processing` for longer than 1 minute.
 
-## How it works
+---
 
-1. `POST /payments` inserts a payment row and enqueues the payment ID
-2. The queue implementation moves jobs from pending to processing and records processing start times
-3. Worker calls the mock provider and handles responses:
-   - 200 OK: updates status to `success`, stores provider ref, removes from processing queue
-   - 503 unavailable: increments attempts, continues immediate retry loop (up to 1 retry)
-   - 422 unprocessable: updates status to `failed_final`, removes from processing queue
-4. After immediate retries exhausted without success: status changes to `failed_retryable` and the job moves to the delayed queue with exponential backoff
-5. On max attempts: the payment moves to the dead queue and status becomes `failed_final`
-6. Retry worker polls delayed jobs and requeues payments whose retry time has arrived
-7. Reaper polls in-flight jobs every 10s and requeues anything stuck longer than 1 minute
-8. Graceful shutdown
+## Getting Started
 
-## Data model
- [schema.sql](/Users/ayush/Developer/okane/schema.sql)
+### Prerequisites
 
-## Queue layout
+- Go 1.26
+- Docker & Docker Compose
 
-- `payments:pending`
-- `payments:processing`
-- `payments:processing:times`
-- `payments:delayed`
-- `payments:dead`
+### Run via Docker Compose
 
-## Payment state
+To start the database, Redis, Mock Provider, and the API server:
+```bash
+make up
+```
 
-- `pending`
-- `processing`
-- `success`
-- `failed_retryable`
-- `failed_final`
+To stop the stack and clean up volumes:
+```bash
+make down
+```
+
+### Run Locally
+
+Create/update your local `.env` with the following variables:
+```env
+PORT=8080
+POSTGRES_USER=okanedbuser
+POSTGRES_PASSWORD=okanedbpass
+POSTGRES_DB=okanedb
+DATABASE_URL=postgresql://okanedbuser:okanedbpass@localhost:5432/okanedb
+REDIS_ADDR=localhost:6379
+PROVIDER_BASE_URL=http://localhost:3000
+MOCK_PROVIDER_PORT=3000
+```
+
+Start the mock provider:
+```bash
+go run ./cmd/mockprovider
+```
+
+Start the API server:
+```bash
+go run ./cmd/okane
+```
+
+---
 
 ## API
 
 ### `POST /payments`
+Enqueues a payment. Requires validation: `amount > 0` and a non-empty `idempotency_key`.
 
-```json
-{
-  "amount": 440,
-  "idempotency_key": "demo-key-1"
-}
+```bash
+curl -i -X POST http://localhost:8080/payments \
+  -H "Content-Type: application/json" \
+  -d '{"amount": 440, "idempotency_key": "demo-key-1"}'
 ```
 
+**Response (`202 Accepted`)**
 ```json
 {
   "payment": {
@@ -100,7 +129,13 @@ flowchart TD
 ```
 
 ### `GET /payments/{id}`
+Retrieves payment status.
 
+```bash
+curl -i http://localhost:8080/payments/7d6adb1e-6627-44ed-a544-0e75d21ef09d
+```
+
+**Response (`200 OK`)**
 ```json
 {
   "payment": {
@@ -108,7 +143,7 @@ flowchart TD
     "amount": 440,
     "status": "success",
     "idempotency_key": "demo-key-1",
-    "provider_ref": "provider-ref-value",
+    "provider_ref": "4ea2641a-7b3b-4835-adcd-f8b8098c4b7b",
     "attempts": 1,
     "created_at": "2026-03-28T18:40:57.436474+05:30",
     "updated_at": "2026-03-28T18:40:57.454445+05:30"
@@ -116,45 +151,51 @@ flowchart TD
 }
 ```
 
-## Configuration
-
-- `DATABASE_URL`
-- `REDIS_ADDR`
-- `PROVIDER_BASE_URL`
-- `PORT`
-- `MOCK_PROVIDER_PORT`
-
-```env
-PORT=8080
-DATABASE_URL=postgresql://ayush:ayush@localhost:5432/okanedb
-REDIS_ADDR=localhost:6379
-PROVIDER_BASE_URL=http://localhost:3000
-MOCK_PROVIDER_PORT=3000
-```
-
-## Execution
+### `GET /health`
+API health-check.
 
 ```bash
-go run ./cmd/mockprovider
+curl -i http://localhost:8080/health
 ```
 
+**Response (`200 OK`)**
+```
+don't worry about me, mate
+```
+
+---
+
+## Key Components
+
+- [cmd/okane/main.go](file:///Users/ayush/Developer/okane/cmd/okane/main.go): Application entrypoint and dependency injection wiring.
+- [internal/handler/handler.go](file:///Users/ayush/Developer/okane/internal/handler/handler.go): HTTP API handlers, custom error wrapper, and request validator.
+- [internal/ratelimit/ratelimit.go](file:///Users/ayush/Developer/okane/internal/ratelimit/ratelimit.go): Redis sliding-window rate limiter middleware.
+- [internal/service/service.go](file:///Users/ayush/Developer/okane/internal/service/service.go): Payment retry state, background workers, and reaper logic.
+- [internal/store/postgres.go](file:///Users/ayush/Developer/okane/internal/store/postgres.go): Postgres-backed storage implementation.
+- [internal/queue/redis.go](file:///Users/ayush/Developer/okane/internal/queue/redis.go): Redis-backed queue implementation.
+
+---
+
+## Testing & Mocking
+
+Run the test suite (uses `miniredis` for queues, and falls back to a test container for database integration tests):
 ```bash
-go run ./cmd/okane
+go test -v ./...
 ```
 
+Mocks are generated using [mockery](https://github.com/vektra/mockery) based on [.mockery.yml](file:///Users/ayush/Developer/okane/.mockery.yml):
 ```bash
-curl http://localhost:8080/payments \
-  -d '{"amount": 440, "idempotency_key":"demo-key-1"}' | jq
+mockery
 ```
 
-```bash
-curl "http://localhost:8080/payments/<payment-id>" | jq
-```
+---
 
-## Roadmap
-- [x] exponential backoff
-- [x] dockerize okane
-- [ ] tests
-- [ ] rate limiting
-- [ ] benchmarking
-- [ ] request validation
+## Project Status
+
+- [x] Exponential backoff & retry
+- [x] Dockerized environment
+- [x] Test suite (unit & integration)
+- [x] Redis sliding-window rate limiting
+- [x] Request payload validation
+- [x] CI pipeline (GitHub Actions)
+- [ ] Benchmarking

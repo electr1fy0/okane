@@ -45,7 +45,7 @@ func (s *RedisLimiterStore) Allow(ctx context.Context, key string, limit int, wi
 
 	count, err := zCard.Result()
 	if err != nil {
-		return false, fmt.Errorf("failed to read window capacity: %w")
+		return false, fmt.Errorf("failed to read window capacity: %w", err)
 	}
 
 	return count <= int64(limit), nil
