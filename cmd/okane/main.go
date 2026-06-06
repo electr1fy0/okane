@@ -13,6 +13,7 @@ import (
 
 	"github.com/electr1fy0/okane/internal/handler"
 	"github.com/electr1fy0/okane/internal/queue"
+	"github.com/electr1fy0/okane/internal/ratelimit"
 	"github.com/electr1fy0/okane/internal/service"
 	"github.com/electr1fy0/okane/internal/store"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -78,10 +79,12 @@ func main() {
 	r.HandleFunc("POST /payments", handler.Handle(h.CreatePayment))
 	r.HandleFunc("GET /payments/{id}", handler.Handle(h.GetPaymentID))
 	r.HandleFunc("GET /health", h.Health)
+	limiterStore := ratelimit.NewRedisLimiterStore(rdb)
+	rateLimiter := ratelimit.NewRateLimiter(limiterStore, 100, 1*time.Minute)
 
 	server := &http.Server{
 		Addr:    addr,
-		Handler: r,
+		Handler: rateLimiter.Middleware(r),
 		BaseContext: func(_ net.Listener) context.Context {
 			return sigCtx
 		},
