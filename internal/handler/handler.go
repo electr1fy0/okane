@@ -70,7 +70,7 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		slog.Error("failed to create payment", "idempotency_key", req.IdempotencyKey, "error", err)
-		http.Error(w, "failed to create payment", http.StatusInternalServerError)
+		http.Error(w, "payment already exists", http.StatusOK)
 		return
 	}
 

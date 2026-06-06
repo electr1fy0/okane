@@ -9,3 +9,5 @@ create table payments (
     created_at timestamptz default now(),
     updated_at timestamptz default now()
 );
+
+create index idx_payments on payments(status);
