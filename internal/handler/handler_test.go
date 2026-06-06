@@ -1,9 +1,7 @@
 package handler
 
 import (
-	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -13,6 +11,7 @@ import (
 	"github.com/electr1fy0/okane/internal/store"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
@@ -29,51 +28,19 @@ func testPayment() store.Payment {
 	}
 }
 
-type fakePaymentAPI struct {
-	createPaymentFn  func(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error)
-	getPaymentByIDFn func(ctx context.Context, id string) (store.Payment, error)
-	enqueuePaymentFn func(ctx context.Context, paymentID string) error
-}
-
-func (f fakePaymentAPI) CreatePayment(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error) {
-	if f.createPaymentFn == nil {
-		return nil, false, errors.New("unexpected CreatePayment call")
-	}
-	return f.createPaymentFn(ctx, params)
-}
-
-func (f fakePaymentAPI) GetPaymentByID(ctx context.Context, id string) (store.Payment, error) {
-	if f.getPaymentByIDFn == nil {
-		return store.Payment{}, errors.New("unexpected GetPaymentByID call")
-	}
-	return f.getPaymentByIDFn(ctx, id)
-}
-
-func (f fakePaymentAPI) EnqueuePayment(ctx context.Context, paymentID string) error {
-	if f.enqueuePaymentFn == nil {
-		return nil
-	}
-	return f.enqueuePaymentFn(ctx, paymentID)
-}
-
 func TestCreatePaymentAcceptedAndEnqueued(t *testing.T) {
 	payment := testPayment()
+	mockSvc := NewMockPaymentService(t)
 
-	var gotParams store.CreatePaymentParams
-	var enqueuedID string
+	mockSvc.On("CreatePayment", mock.Anything, store.CreatePaymentParams{
+		Amount:         440,
+		Status:         "pending",
+		IdempotencyKey: "demo-key-1",
+	}).Return(&payment, true, nil)
 
-	handler := &APIHandler{
-		svc: fakePaymentAPI{
-			createPaymentFn: func(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error) {
-				gotParams = params
-				return &payment, true, nil
-			},
-			enqueuePaymentFn: func(ctx context.Context, paymentID string) error {
-				enqueuedID = paymentID
-				return nil
-			},
-		},
-	}
+	mockSvc.On("EnqueuePayment", mock.Anything, payment.ID.String()).Return(nil)
+
+	handler := &APIHandler{svc: mockSvc}
 
 	req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{"amount":440,"idempotency_key":"demo-key-1"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -81,10 +48,6 @@ func TestCreatePaymentAcceptedAndEnqueued(t *testing.T) {
 
 	Handle(handler.CreatePayment)(rr, req)
 	assert.Equal(t, http.StatusAccepted, rr.Code, "body=%s", rr.Body.String())
-
-	assert.Equal(t, int64(440), gotParams.Amount)
-	assert.Equal(t, "demo-key-1", gotParams.IdempotencyKey)
-	assert.Equal(t, payment.ID.String(), enqueuedID)
 
 	var resp CreatePaymentResponse
 	err := json.Unmarshal(rr.Body.Bytes(), &resp)
@@ -96,7 +59,8 @@ func TestCreatePaymentAcceptedAndEnqueued(t *testing.T) {
 }
 
 func TestCreatePaymentRejectsInvalidJSON(t *testing.T) {
-	handler := &APIHandler{fakePaymentAPI{}}
+	mockSvc := NewMockPaymentService(t)
+	handler := &APIHandler{svc: mockSvc}
 	req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{"amount":`))
 	rr := httptest.NewRecorder()
 
@@ -113,17 +77,15 @@ func TestCreatePaymentRejectsInvalidJSON(t *testing.T) {
 
 func TestCreatePaymentRejectsDuplicateIdempotencyKey(t *testing.T) {
 	payment := testPayment()
-	handler := &APIHandler{
-		svc: fakePaymentAPI{
-			createPaymentFn: func(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error) {
-				return &payment, false, nil
-			},
-			enqueuePaymentFn: func(ctx context.Context, paymentID string) error {
-				assert.Fail(t, "enqueue should not be called for duplicate idempotency key")
-				return nil
-			},
-		},
-	}
+	mockSvc := NewMockPaymentService(t)
+
+	mockSvc.On("CreatePayment", mock.Anything, store.CreatePaymentParams{
+		Amount:         440,
+		Status:         "pending",
+		IdempotencyKey: "demo-key-1",
+	}).Return(&payment, false, nil)
+
+	handler := &APIHandler{svc: mockSvc}
 
 	req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{"amount": 440, "idempotency_key": "demo-key-1"}`))
 	req.Header.Set("Content-Type", "application/json")
@@ -136,21 +98,17 @@ func TestCreatePaymentRejectsDuplicateIdempotencyKey(t *testing.T) {
 
 func TestGetPaymentByIDReturnsPayment(t *testing.T) {
 	payment := testPayment()
+	mockSvc := NewMockPaymentService(t)
 
-	handler := &APIHandler{
-		svc: fakePaymentAPI{
-			getPaymentByIDFn: func(ctx context.Context, id string) (store.Payment, error) {
-				assert.Equal(t, payment.ID.String(), id)
-				return payment, nil
-			},
-		},
-	}
+	mockSvc.On("GetPaymentByID", mock.Anything, payment.ID.String()).Return(payment, nil)
+
+	handler := &APIHandler{svc: mockSvc}
 
 	req := httptest.NewRequest(http.MethodGet, "/payments/"+payment.ID.String(), nil)
 	req.SetPathValue("id", payment.ID.String())
 	rr := httptest.NewRecorder()
 
-	Handle(handler.GetPaymentID)(rr, req)
+	handler.GetPaymentID(rr, req)
 
 	assert.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
 
