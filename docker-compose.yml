@@ -1,14 +1,16 @@
 services:
   db:
-    image: postgres
+    image: postgres:18-alpine
     ports:
       - "5432:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/18/docker
     environment:
-      POSTGRES_USER: okanedbuser
-      POSTGRES_PASSWORD: okanedbpass
-      POSTGRES_DB: okanedb
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U okanedbuser -d okanedb"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -36,7 +38,7 @@ services:
         condition: service_healthy
     environment:
       PROVIDER_BASE_URL: http://provider:3000
-      DATABASE_URL: postgres://okanedbuser:okanedbpass@db:5432/okanedb
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       REDIS_ADDR: redis:6379
 
   provider:
@@ -45,3 +47,6 @@ services:
       dockerfile: cmd/mockprovider/Dockerfile
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+
+volumes:
+  db_data:

@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/electr1fy0/okane/internal/types"
-	"github.com/electr1fy0/okane/internal/utils"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -37,7 +36,7 @@ func (s *PostgresStore) RecordProcessingFailure(ctx context.Context, id, lastErr
 		attemptDelta = 1
 	}
 
-	tag, err := s.db.Exec(ctx, query, utils.NullableText(lastError), attemptDelta, id, types.PaymentStatusProcessing)
+	tag, err := s.db.Exec(ctx, query, nullableText(lastError), attemptDelta, id, types.PaymentStatusProcessing)
 	if err != nil {
 		return err
 	}
@@ -65,7 +64,7 @@ func (s *PostgresStore) UpdatePayment(ctx context.Context, id, fromStatus, toSta
 	}
 
 	payment := Payment{}
-	err := s.db.QueryRow(ctx, query, toStatus, utils.NullableText(lastError), attemptDelta, id, fromStatus).Scan(
+	err := s.db.QueryRow(ctx, query, toStatus, nullableText(lastError), attemptDelta, id, fromStatus).Scan(
 		&payment.ID,
 		&payment.Amount,
 		&payment.Status,
@@ -180,4 +179,11 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, params CreatePaymentP
 	}
 
 	return payment, true, nil
+}
+
+func nullableText(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
 }

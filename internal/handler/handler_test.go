@@ -104,6 +104,11 @@ func TestCreatePaymentRejectsInvalidJSON(t *testing.T) {
 	handler.CreatePayment(rr, req)
 
 	assert.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", rr.Body.String())
+
+	req = httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{"amount": 0, "idempotency_key":"key"}`))
+
+	handler.CreatePayment(rr, req)
+	assert.Equal(t, http.StatusBadRequest, rr.Code)
 }
 
 func TestCreatePaymentRejectsDuplicateIdempotencyKey(t *testing.T) {

@@ -10,8 +10,11 @@ import (
 
 	"github.com/electr1fy0/okane/internal/store"
 	"github.com/electr1fy0/okane/internal/types"
+	"github.com/go-playground/validator/v10"
 	"github.com/jackc/pgx/v5"
 )
+
+var validate = validator.New()
 
 type CreatePaymentResponse struct {
 	Payment  store.Payment `json:"payment"`
@@ -24,8 +27,8 @@ type GetPaymentResponse struct {
 }
 
 type createPaymentRequest struct {
-	Amount         int64  `json:"amount"`
-	IdempotencyKey string `json:"idempotency_key"`
+	Amount         int64  `json:"amount" validate:"gt=0"`
+	IdempotencyKey string `json:"idempotency_key" validate:"required"`
 }
 
 type PaymentService interface {
@@ -59,6 +62,11 @@ func (h *APIHandler) CreatePayment(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		slog.Error("failed to decode create payment request", "error", err)
 		http.Error(w, "failed to decode the payment", http.StatusBadRequest)
+		return
+	}
+	if err := validate.Struct(req); err != nil {
+		slog.Error("validation failed", "error", err)
+		http.Error(w, "invalid request body: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 
