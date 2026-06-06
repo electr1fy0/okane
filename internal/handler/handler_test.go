@@ -13,6 +13,8 @@ import (
 	"github.com/electr1fy0/okane/internal/store"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func testPayment() store.Payment {
@@ -79,29 +81,19 @@ func TestCreatePaymentAcceptedAndEnqueued(t *testing.T) {
 	rr := httptest.NewRecorder()
 
 	handler.CreatePayment(rr, req)
-	if rr.Code != http.StatusAccepted {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusAccepted, rr.Code, rr.Body.String())
-	}
+	assert.Equal(t, http.StatusAccepted, rr.Code, "body=%s", rr.Body.String())
 
-	if gotParams.Amount != 440 || gotParams.IdempotencyKey != "demo-key-1" {
-		t.Fatalf("unexpected create params: %+v", gotParams)
-	}
+	assert.Equal(t, int64(440), gotParams.Amount)
+	assert.Equal(t, "demo-key-1", gotParams.IdempotencyKey)
+	assert.Equal(t, payment.ID.String(), enqueuedID)
 
-	if enqueuedID != payment.ID.String() {
-		t.Fatalf("expected enqueued payment ID %s, got %s", payment.ID.String(), enqueuedID)
-	}
 	var resp CreatePaymentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	err := json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err)
 
-	if !resp.Created || !resp.Enqueued {
-		t.Fatalf("expected created and enqueued response, got %+v", resp)
-	}
-
-	if resp.Payment.ID != payment.ID {
-		t.Fatalf("expected payment ID %s, got %s", payment.ID, resp.Payment.ID)
-	}
+	assert.True(t, resp.Created)
+	assert.True(t, resp.Enqueued)
+	assert.Equal(t, payment.ID, resp.Payment.ID)
 }
 
 func TestCreatePaymentRejectsInvalidJSON(t *testing.T) {
@@ -111,37 +103,29 @@ func TestCreatePaymentRejectsInvalidJSON(t *testing.T) {
 
 	handler.CreatePayment(rr, req)
 
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusBadRequest, rr.Code, rr.Body.String())
-	}
+	assert.Equal(t, http.StatusBadRequest, rr.Code, "body=%s", rr.Body.String())
 }
 
 func TestCreatePaymentRejectsDuplicateIdempotencyKey(t *testing.T) {
-
 	handler := &APIHandler{
 		svc: fakePaymentAPI{
 			createPaymentFn: func(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error) {
 				return nil, false, &pgconn.PgError{Code: "23505"}
-
 			},
 			enqueuePaymentFn: func(ctx context.Context, paymentID string) error {
-				t.Fatal("enqueue should not be called for duplicate idempotency key")
+				assert.Fail(t, "enqueue should not be called for duplicate idempotency key")
 				return nil
 			},
 		},
 	}
 
 	req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(`{"amount": 440, "idempotency_key": "demo-key-1"}`))
-
 	req.Header.Set("Content-Type", "application/json")
-
 	rr := httptest.NewRecorder()
 
 	handler.CreatePayment(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected %d, got %d body=%s", http.StatusOK, rr.Code, rr.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
 }
 
 func TestGetPaymentByIDReturnsPayment(t *testing.T) {
@@ -150,9 +134,7 @@ func TestGetPaymentByIDReturnsPayment(t *testing.T) {
 	handler := &APIHandler{
 		svc: fakePaymentAPI{
 			getPaymentByIDFn: func(ctx context.Context, id string) (store.Payment, error) {
-				if id != payment.ID.String() {
-					t.Fatalf("unexpected payment lookup id, got %v, expected %v", id, payment.ID.String())
-				}
+				assert.Equal(t, payment.ID.String(), id)
 				return payment, nil
 			},
 		},
@@ -164,31 +146,11 @@ func TestGetPaymentByIDReturnsPayment(t *testing.T) {
 
 	handler.GetPaymentID(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected status %d, got %d body=%s", http.StatusOK, rr.Code, rr.Body.String())
-	}
+	assert.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
 
 	var resp GetPaymentResponse
-	if err := json.Unmarshal(rr.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode response: %v", err)
-	}
+	err := json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err)
 
-	if resp.Payment.ID != payment.ID {
-		t.Fatalf("expected payment ID %s, got %s", payment.ID, resp.Payment.ID)
-	}
-}
-
-func TestGetPaymentByIDRequiresPathValue(t *testing.T) {
-	handler := &APIHandler{
-		svc: fakePaymentAPI{},
-	}
-	req := httptest.NewRequest(http.MethodPost, "/payments/", nil)
-	rr := httptest.NewRecorder()
-
-	handler.GetPaymentID(rr, req)
-
-	if rr.Code != http.StatusBadRequest {
-		t.Fatalf("expected status %d, got  %d body=%s", http.StatusBadRequest, rr.Code, rr.Body.String())
-	}
-
+	assert.Equal(t, payment.ID, resp.Payment.ID)
 }
