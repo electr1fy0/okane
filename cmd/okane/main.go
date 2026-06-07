@@ -12,10 +12,11 @@ import (
 	"time"
 
 	"github.com/electr1fy0/okane/internal/handler"
-	"github.com/electr1fy0/okane/internal/queue"
 	"github.com/electr1fy0/okane/internal/ratelimit"
 	"github.com/electr1fy0/okane/internal/service"
 	"github.com/electr1fy0/okane/internal/store"
+	"github.com/electr1fy0/okane/internal/worker"
+	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/joho/godotenv"
 	"github.com/redis/go-redis/v9"
@@ -27,6 +28,7 @@ const (
 	serverWriteTimeout    = 10 * time.Second
 	serverIdleTimeout     = 60 * time.Second
 	serverShutdownTimeout = 30 * time.Second
+	workerConcurrency     = 5
 )
 
 func mustGetEnv(key string) string {
@@ -63,22 +65,22 @@ func main() {
 		log.Fatalln("failed to connect to db", err)
 	}
 
-	rdb := redis.NewClient(&redis.Options{
-		Addr:     redisAddr,
-		Password: "",
-		DB:       0,
-		Protocol: 2,
-	})
+	redisOpt := asynq.RedisClientOpt{Addr: redisAddr}
+
+	ac := asynq.NewClient(redisOpt)
 
 	paymentStore := store.New(dbPool)
-	paymentQueue := queue.NewRedis(rdb)
-	svc := service.New(paymentStore, paymentQueue, providerClient, service.WorkerCount)
+	svc := service.New(paymentStore, providerClient, ac)
 	h := handler.New(svc)
+
+	workerSrv := worker.NewServer(redisOpt, svc, workerConcurrency)
 
 	r := http.NewServeMux()
 	r.HandleFunc("POST /payments", handler.Handle(h.CreatePayment))
 	r.HandleFunc("GET /payments/{id}", handler.Handle(h.GetPaymentID))
 	r.HandleFunc("GET /health", h.Health)
+
+	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
 	limiterStore := ratelimit.NewRedisLimiterStore(rdb)
 	rateLimiter := ratelimit.NewRateLimiter(limiterStore, 100, 1*time.Minute)
 
@@ -93,7 +95,7 @@ func main() {
 		IdleTimeout:  serverIdleTimeout,
 	}
 
-	g, workerCtx := errgroup.WithContext(sigCtx)
+	g, _ := errgroup.WithContext(sigCtx)
 
 	g.Go(func() error {
 		slog.Info("starting server", "addr", addr)
@@ -102,11 +104,14 @@ func main() {
 		}
 		return nil
 	})
-	g.Go(func() error { return svc.Start(workerCtx) })
-	g.Go(func() error { return svc.RetryWorker(workerCtx) })
-	g.Go(func() error { return svc.ReaperWorker(workerCtx) })
+	g.Go(func() error {
+		slog.Info("starting worker", "concurrency", workerConcurrency)
+		return workerSrv.Run()
+	})
 	g.Go(func() error {
 		<-sigCtx.Done()
+		ac.Close()
+		workerSrv.Shutdown()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), serverShutdownTimeout)
 		defer cancel()
 		return server.Shutdown(shutdownCtx)
