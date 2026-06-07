@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/electr1fy0/okane/internal/payment"
 	"github.com/electr1fy0/okane/internal/queue"
 	"github.com/electr1fy0/okane/internal/store"
-	"github.com/electr1fy0/okane/internal/types"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -60,11 +60,11 @@ func (s *Service) EnqueuePayment(ctx context.Context, paymentID string) error {
 	return s.queue.EnqueuePending(ctx, paymentID)
 }
 
-func (s *Service) CreatePayment(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error) {
+func (s *Service) CreatePayment(ctx context.Context, params payment.CreatePaymentParams) (*payment.Payment, bool, error) {
 	return s.store.CreatePayment(ctx, params)
 }
 
-func (s *Service) GetPaymentByID(ctx context.Context, id string) (store.Payment, error) {
+func (s *Service) GetPaymentByID(ctx context.Context, id string) (payment.Payment, error) {
 	return s.store.GetPaymentByID(ctx, id)
 }
 
@@ -106,7 +106,7 @@ retryLoop:
 
 		switch status {
 		case http.StatusOK:
-			_, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusSuccess, "", true)
+			_, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusProcessing, payment.StatusSuccess, "", true)
 			if err != nil {
 				slog.Error("failed to update payment success state", "payment_id", paymentID, "error", err)
 				return err
@@ -128,7 +128,7 @@ retryLoop:
 			}
 		case http.StatusUnprocessableEntity:
 			slog.Warn("payment rejected by provider", "payment_id", paymentID)
-			_, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedFinal, "unprocessable payment", false)
+			_, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusProcessing, payment.StatusFailedFinal, "unprocessable payment", false)
 			if err != nil {
 				slog.Error("failed to update failed payment state", "payment_id", paymentID, "error", err)
 				return err
@@ -150,13 +150,13 @@ retryLoop:
 		return nil
 	}
 
-	payment, err := s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedRetryable, "service unavailable", false)
+	p, err := s.store.UpdatePayment(ctx, paymentID, payment.StatusProcessing, payment.StatusFailedRetryable, "service unavailable", false)
 	if err != nil {
 		slog.Error("failed to update retryable failure state", "payment_id", paymentID, "error", err)
 		return err
 	}
 
-	return s.addToRetryLater(ctx, paymentID, payment.Attempts)
+	return s.addToRetryLater(ctx, paymentID, p.Attempts)
 }
 
 func (s *Service) addToRetryLater(ctx context.Context, paymentID string, attempts int) error {
@@ -195,52 +195,52 @@ func (s *Service) Work(ctx context.Context, id int) error {
 		}
 		slog.Info("worker picked payment", "worker_id", id, "payment_id", paymentID)
 
-		payment, err := s.store.GetPaymentByID(ctx, paymentID)
+		p, err := s.store.GetPaymentByID(ctx, paymentID)
 		if err != nil {
 			slog.Error("failed to load payment", "payment_id", paymentID, "worker_id", id, "error", err)
 			return err
 		}
 
-		if payment.Status == types.PaymentStatusSuccess || payment.Status == types.PaymentStatusFailedFinal {
+		if p.Status == payment.StatusSuccess || p.Status == payment.StatusFailedFinal {
 			_ = s.queue.RemoveProcessing(ctx, paymentID)
 			continue
 		}
-		if payment.Status == types.PaymentStatusPending {
-			payment, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusPending, types.PaymentStatusProcessing, "", false)
+		if p.Status == payment.StatusPending {
+			p, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusPending, payment.StatusProcessing, "", false)
 			if err != nil {
 				slog.Error("failed to move payment to processing", "payment_id", paymentID, "worker_id", id, "error", err)
 				return err
 			}
 		}
 
-		if payment.Status == types.PaymentStatusFailedRetryable {
-			payment, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusFailedRetryable, types.PaymentStatusProcessing, "", false)
+		if p.Status == payment.StatusFailedRetryable {
+			p, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusFailedRetryable, payment.StatusProcessing, "", false)
 			if err != nil {
 				slog.Error("failed to resume retryable payment", "payment_id", paymentID, "worker_id", id, "error", err)
 				return err
 			}
 		}
 
-		if payment.Status != types.PaymentStatusProcessing {
-			slog.Warn("skipping payment with non-processable status", "payment_id", paymentID, "worker_id", id, "status", payment.Status)
+		if p.Status != payment.StatusProcessing {
+			slog.Warn("skipping payment with non-processable status", "payment_id", paymentID, "worker_id", id, "status", p.Status)
 			_ = s.queue.RemoveProcessing(ctx, paymentID)
 			continue
 		}
 
-		if payment.Attempts >= MaxAttemptsBeforeDLQ {
+		if p.Attempts >= MaxAttemptsBeforeDLQ {
 			_ = s.queue.RemoveProcessing(ctx, paymentID)
 			_ = s.queue.EnqueueDead(ctx, paymentID)
 			lastError := ""
-			if payment.LastError != nil {
-				lastError = *payment.LastError
+			if p.LastError != nil {
+				lastError = *p.LastError
 			}
 
-			_, err = s.store.UpdatePayment(ctx, paymentID, types.PaymentStatusProcessing, types.PaymentStatusFailedFinal, lastError, false)
+			_, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusProcessing, payment.StatusFailedFinal, lastError, false)
 			if err != nil {
 				slog.Error("failed to update dead-lettered payment", "payment_id", paymentID, "error", err)
 				return err
 			}
-			slog.Warn("payment moved to dead queue", "payment_id", paymentID, "attempts", payment.Attempts)
+			slog.Warn("payment moved to dead queue", "payment_id", paymentID, "attempts", p.Attempts)
 			continue
 		}
 
@@ -316,13 +316,13 @@ func (s *Service) RetryWorker(ctx context.Context) error {
 		}
 		paymentID := job.PaymentID
 
-		payment, err := s.store.GetPaymentByID(ctx, paymentID)
+		p, err := s.store.GetPaymentByID(ctx, paymentID)
 		if err != nil {
 			slog.Error("retry worker failed to load payment", "payment_id", paymentID, "error", err)
 			continue
 		}
-		if payment.Status != types.PaymentStatusFailedRetryable {
-			slog.Warn("retry worker dropping non-retryable payment", "payment_id", paymentID, "status", payment.Status)
+		if p.Status != payment.StatusFailedRetryable {
+			slog.Warn("retry worker dropping non-retryable payment", "payment_id", paymentID, "status", p.Status)
 			_ = s.queue.RemoveDelayed(ctx, paymentID)
 			continue
 		}

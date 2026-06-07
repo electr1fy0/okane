@@ -7,7 +7,7 @@ package handler
 import (
 	"context"
 
-	"github.com/electr1fy0/okane/internal/store"
+	"github.com/electr1fy0/okane/internal/payment"
 	mock "github.com/stretchr/testify/mock"
 )
 
@@ -39,32 +39,32 @@ func (_m *MockPaymentService) EXPECT() *MockPaymentService_Expecter {
 }
 
 // CreatePayment provides a mock function for the type MockPaymentService
-func (_mock *MockPaymentService) CreatePayment(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error) {
+func (_mock *MockPaymentService) CreatePayment(ctx context.Context, params payment.CreatePaymentParams) (*payment.Payment, bool, error) {
 	ret := _mock.Called(ctx, params)
 
 	if len(ret) == 0 {
 		panic("no return value specified for CreatePayment")
 	}
 
-	var r0 *store.Payment
+	var r0 *payment.Payment
 	var r1 bool
 	var r2 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, store.CreatePaymentParams) (*store.Payment, bool, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, payment.CreatePaymentParams) (*payment.Payment, bool, error)); ok {
 		return returnFunc(ctx, params)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, store.CreatePaymentParams) *store.Payment); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, payment.CreatePaymentParams) *payment.Payment); ok {
 		r0 = returnFunc(ctx, params)
 	} else {
 		if ret.Get(0) != nil {
-			r0 = ret.Get(0).(*store.Payment)
+			r0 = ret.Get(0).(*payment.Payment)
 		}
 	}
-	if returnFunc, ok := ret.Get(1).(func(context.Context, store.CreatePaymentParams) bool); ok {
+	if returnFunc, ok := ret.Get(1).(func(context.Context, payment.CreatePaymentParams) bool); ok {
 		r1 = returnFunc(ctx, params)
 	} else {
 		r1 = ret.Get(1).(bool)
 	}
-	if returnFunc, ok := ret.Get(2).(func(context.Context, store.CreatePaymentParams) error); ok {
+	if returnFunc, ok := ret.Get(2).(func(context.Context, payment.CreatePaymentParams) error); ok {
 		r2 = returnFunc(ctx, params)
 	} else {
 		r2 = ret.Error(2)
@@ -79,20 +79,20 @@ type MockPaymentService_CreatePayment_Call struct {
 
 // CreatePayment is a helper method to define mock.On call
 //   - ctx context.Context
-//   - params store.CreatePaymentParams
+//   - params payment.CreatePaymentParams
 func (_e *MockPaymentService_Expecter) CreatePayment(ctx interface{}, params interface{}) *MockPaymentService_CreatePayment_Call {
 	return &MockPaymentService_CreatePayment_Call{Call: _e.mock.On("CreatePayment", ctx, params)}
 }
 
-func (_c *MockPaymentService_CreatePayment_Call) Run(run func(ctx context.Context, params store.CreatePaymentParams)) *MockPaymentService_CreatePayment_Call {
+func (_c *MockPaymentService_CreatePayment_Call) Run(run func(ctx context.Context, params payment.CreatePaymentParams)) *MockPaymentService_CreatePayment_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		var arg0 context.Context
 		if args[0] != nil {
 			arg0 = args[0].(context.Context)
 		}
-		var arg1 store.CreatePaymentParams
+		var arg1 payment.CreatePaymentParams
 		if args[1] != nil {
-			arg1 = args[1].(store.CreatePaymentParams)
+			arg1 = args[1].(payment.CreatePaymentParams)
 		}
 		run(
 			arg0,
@@ -102,12 +102,12 @@ func (_c *MockPaymentService_CreatePayment_Call) Run(run func(ctx context.Contex
 	return _c
 }
 
-func (_c *MockPaymentService_CreatePayment_Call) Return(payment *store.Payment, b bool, err error) *MockPaymentService_CreatePayment_Call {
-	_c.Call.Return(payment, b, err)
+func (_c *MockPaymentService_CreatePayment_Call) Return(payment1 *payment.Payment, b bool, err error) *MockPaymentService_CreatePayment_Call {
+	_c.Call.Return(payment1, b, err)
 	return _c
 }
 
-func (_c *MockPaymentService_CreatePayment_Call) RunAndReturn(run func(ctx context.Context, params store.CreatePaymentParams) (*store.Payment, bool, error)) *MockPaymentService_CreatePayment_Call {
+func (_c *MockPaymentService_CreatePayment_Call) RunAndReturn(run func(ctx context.Context, params payment.CreatePaymentParams) (*payment.Payment, bool, error)) *MockPaymentService_CreatePayment_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -170,22 +170,22 @@ func (_c *MockPaymentService_EnqueuePayment_Call) RunAndReturn(run func(ctx cont
 }
 
 // GetPaymentByID provides a mock function for the type MockPaymentService
-func (_mock *MockPaymentService) GetPaymentByID(ctx context.Context, id string) (store.Payment, error) {
+func (_mock *MockPaymentService) GetPaymentByID(ctx context.Context, id string) (payment.Payment, error) {
 	ret := _mock.Called(ctx, id)
 
 	if len(ret) == 0 {
 		panic("no return value specified for GetPaymentByID")
 	}
 
-	var r0 store.Payment
+	var r0 payment.Payment
 	var r1 error
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (store.Payment, error)); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) (payment.Payment, error)); ok {
 		return returnFunc(ctx, id)
 	}
-	if returnFunc, ok := ret.Get(0).(func(context.Context, string) store.Payment); ok {
+	if returnFunc, ok := ret.Get(0).(func(context.Context, string) payment.Payment); ok {
 		r0 = returnFunc(ctx, id)
 	} else {
-		r0 = ret.Get(0).(store.Payment)
+		r0 = ret.Get(0).(payment.Payment)
 	}
 	if returnFunc, ok := ret.Get(1).(func(context.Context, string) error); ok {
 		r1 = returnFunc(ctx, id)
@@ -225,12 +225,12 @@ func (_c *MockPaymentService_GetPaymentByID_Call) Run(run func(ctx context.Conte
 	return _c
 }
 
-func (_c *MockPaymentService_GetPaymentByID_Call) Return(payment store.Payment, err error) *MockPaymentService_GetPaymentByID_Call {
-	_c.Call.Return(payment, err)
+func (_c *MockPaymentService_GetPaymentByID_Call) Return(payment1 payment.Payment, err error) *MockPaymentService_GetPaymentByID_Call {
+	_c.Call.Return(payment1, err)
 	return _c
 }
 
-func (_c *MockPaymentService_GetPaymentByID_Call) RunAndReturn(run func(ctx context.Context, id string) (store.Payment, error)) *MockPaymentService_GetPaymentByID_Call {
+func (_c *MockPaymentService_GetPaymentByID_Call) RunAndReturn(run func(ctx context.Context, id string) (payment.Payment, error)) *MockPaymentService_GetPaymentByID_Call {
 	_c.Call.Return(run)
 	return _c
 }

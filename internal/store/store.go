@@ -2,34 +2,15 @@ package store
 
 import (
 	"context"
-	"time"
 
-	"github.com/google/uuid"
+	"github.com/electr1fy0/okane/internal/payment"
 )
 
-type Payment struct {
-	ID             uuid.UUID `json:"id"`
-	Amount         int64     `json:"amount"`
-	Status         string    `json:"status"`
-	IdempotencyKey string    `json:"idempotency_key"`
-	ProviderRef    *string   `json:"provider_ref,omitempty"`
-	Attempts       int       `json:"attempts"`
-	LastError      *string   `json:"last_error,omitempty"`
-	CreatedAt      time.Time `json:"created_at"`
-	UpdatedAt      time.Time `json:"updated_at"`
-}
-
-type CreatePaymentParams struct {
-	Amount         int64  `json:"amount"`
-	Status         string `json:"status"`
-	IdempotencyKey string `json:"idempotency_key"`
-}
-
 type Store interface {
-	CreatePayment(ctx context.Context, params CreatePaymentParams) (*Payment, bool, error)
-	GetPaymentByID(ctx context.Context, id string) (Payment, error)
-	GetPaymentByIdempotencyKey(ctx context.Context, key string) (Payment, error)
-	UpdatePayment(ctx context.Context, id, fromStatus, toStatus, lastError string, incrementAttempts bool) (Payment, error)
+	CreatePayment(ctx context.Context, params payment.CreatePaymentParams) (*payment.Payment, bool, error)
+	GetPaymentByID(ctx context.Context, id string) (payment.Payment, error)
+	GetPaymentByIdempotencyKey(ctx context.Context, key string) (payment.Payment, error)
+	UpdatePayment(ctx context.Context, id string, fromStatus, toStatus payment.Status, lastError string, incrementAttempts bool) (payment.Payment, error)
 	UpdateProviderRef(ctx context.Context, id, providerRef string) error
 	RecordProcessingFailure(ctx context.Context, id, lastError string, incrementAttempts bool) error
 }

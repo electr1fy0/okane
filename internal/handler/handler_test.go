@@ -8,19 +8,19 @@ import (
 	"testing"
 	"time"
 
-	"github.com/electr1fy0/okane/internal/store"
+	"github.com/electr1fy0/okane/internal/payment"
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 )
 
-func testPayment() store.Payment {
+func testPayment() payment.Payment {
 	now := time.Unix(1710000000, 0).UTC()
-	return store.Payment{
+	return payment.Payment{
 		ID:             uuid.MustParse("11111111-1111-1111-1111-111111111111"),
 		Amount:         440,
-		Status:         "pending",
+		Status:         payment.StatusPending,
 		IdempotencyKey: "demo-key-1",
 		Attempts:       0,
 		CreatedAt:      now,
@@ -29,16 +29,16 @@ func testPayment() store.Payment {
 }
 
 func TestCreatePaymentAcceptedAndEnqueued(t *testing.T) {
-	payment := testPayment()
+	p := testPayment()
 	mockSvc := NewMockPaymentService(t)
 
-	mockSvc.On("CreatePayment", mock.Anything, store.CreatePaymentParams{
+	mockSvc.On("CreatePayment", mock.Anything, payment.CreatePaymentParams{
 		Amount:         440,
-		Status:         "pending",
+		Status:         payment.StatusPending,
 		IdempotencyKey: "demo-key-1",
-	}).Return(&payment, true, nil)
+	}).Return(&p, true, nil)
 
-	mockSvc.On("EnqueuePayment", mock.Anything, payment.ID.String()).Return(nil)
+	mockSvc.On("EnqueuePayment", mock.Anything, p.ID.String()).Return(nil)
 
 	handler := &APIHandler{svc: mockSvc}
 
@@ -55,7 +55,7 @@ func TestCreatePaymentAcceptedAndEnqueued(t *testing.T) {
 
 	assert.True(t, resp.Created)
 	assert.True(t, resp.Enqueued)
-	assert.Equal(t, payment.ID, resp.Payment.ID)
+	assert.Equal(t, p.ID, resp.Payment.ID)
 }
 
 func TestCreatePaymentRejectsInvalidJSON(t *testing.T) {
@@ -76,14 +76,14 @@ func TestCreatePaymentRejectsInvalidJSON(t *testing.T) {
 }
 
 func TestCreatePaymentRejectsDuplicateIdempotencyKey(t *testing.T) {
-	payment := testPayment()
+	p := testPayment()
 	mockSvc := NewMockPaymentService(t)
 
-	mockSvc.On("CreatePayment", mock.Anything, store.CreatePaymentParams{
+	mockSvc.On("CreatePayment", mock.Anything, payment.CreatePaymentParams{
 		Amount:         440,
-		Status:         "pending",
+		Status:         payment.StatusPending,
 		IdempotencyKey: "demo-key-1",
-	}).Return(&payment, false, nil)
+	}).Return(&p, false, nil)
 
 	handler := &APIHandler{svc: mockSvc}
 
@@ -97,15 +97,15 @@ func TestCreatePaymentRejectsDuplicateIdempotencyKey(t *testing.T) {
 }
 
 func TestGetPaymentByIDReturnsPayment(t *testing.T) {
-	payment := testPayment()
+	p := testPayment()
 	mockSvc := NewMockPaymentService(t)
 
-	mockSvc.On("GetPaymentByID", mock.Anything, payment.ID.String()).Return(payment, nil)
+	mockSvc.On("GetPaymentByID", mock.Anything, p.ID.String()).Return(p, nil)
 
 	handler := &APIHandler{svc: mockSvc}
 
-	req := httptest.NewRequest(http.MethodGet, "/payments/"+payment.ID.String(), nil)
-	req.SetPathValue("id", payment.ID.String())
+	req := httptest.NewRequest(http.MethodGet, "/payments/"+p.ID.String(), nil)
+	req.SetPathValue("id", p.ID.String())
 	rr := httptest.NewRecorder()
 
 	handler.GetPaymentID(rr, req)
@@ -116,5 +116,5 @@ func TestGetPaymentByIDReturnsPayment(t *testing.T) {
 	err := json.Unmarshal(rr.Body.Bytes(), &resp)
 	require.NoError(t, err)
 
-	assert.Equal(t, payment.ID, resp.Payment.ID)
+	assert.Equal(t, p.ID, resp.Payment.ID)
 }

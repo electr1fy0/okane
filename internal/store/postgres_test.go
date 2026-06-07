@@ -5,6 +5,7 @@ import (
 	"os"
 	"testing"
 
+	"github.com/electr1fy0/okane/internal/payment"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,24 +45,24 @@ func TestPostgresStore_CreatePayment(t *testing.T) {
 	defer teardown()
 	ctx := context.Background()
 
-	store := New(pool)
-	params := CreatePaymentParams{
+	s := New(pool)
+	params := payment.CreatePaymentParams{
 		Amount:         500,
-		Status:         "pending",
+		Status:         payment.StatusPending,
 		IdempotencyKey: "test-key-1",
 	}
 
-	payment, created, err := store.CreatePayment(ctx, params)
+	p, created, err := s.CreatePayment(ctx, params)
 	require.NoError(t, err)
 	assert.True(t, created)
-	assert.Equal(t, params.Amount, payment.Amount)
-	assert.Equal(t, params.IdempotencyKey, payment.IdempotencyKey)
-	assert.Equal(t, params.Status, payment.Status)
+	assert.Equal(t, params.Amount, p.Amount)
+	assert.Equal(t, params.IdempotencyKey, p.IdempotencyKey)
+	assert.Equal(t, params.Status, p.Status)
 
-	existingPayment, createdAgain, err := store.CreatePayment(ctx, params)
+	existingPayment, createdAgain, err := s.CreatePayment(ctx, params)
 	require.NoError(t, err)
 	assert.False(t, createdAgain)
-	assert.Equal(t, payment.ID, existingPayment.ID)
+	assert.Equal(t, p.ID, existingPayment.ID)
 }
 
 func TestPostgresStore_GetPaymentByID(t *testing.T) {
@@ -69,18 +70,18 @@ func TestPostgresStore_GetPaymentByID(t *testing.T) {
 	defer teardown()
 	ctx := context.Background()
 
-	store := New(pool)
+	s := New(pool)
 
-	payment, _, err := store.CreatePayment(ctx, CreatePaymentParams{
+	p, _, err := s.CreatePayment(ctx, payment.CreatePaymentParams{
 		Amount:         500,
-		Status:         "pending",
+		Status:         payment.StatusPending,
 		IdempotencyKey: "test-key-1",
 	})
 	require.NoError(t, err)
 
-	found, err := store.GetPaymentByID(ctx, payment.ID.String())
+	found, err := s.GetPaymentByID(ctx, p.ID.String())
 	require.NoError(t, err)
 
-	assert.Equal(t, payment.ID, found.ID)
+	assert.Equal(t, p.ID, found.ID)
 	assert.Equal(t, int64(500), found.Amount)
 }
