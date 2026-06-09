@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/electr1fy0/okane/internal/payment"
 	"github.com/google/uuid"
@@ -56,6 +57,7 @@ func (s *PostgresStore) RecordProcessingFailure(ctx context.Context, id, lastErr
 
 	tag, err := s.db.Exec(ctx, query, nullableText(lastError), attemptDelta, id, payment.StatusProcessing)
 	if err != nil {
+		slog.Error("failed to record processing failure", "payment_id", id, "error", err)
 		return err
 	}
 	if tag.RowsAffected() == 0 {
@@ -86,6 +88,7 @@ func (s *PostgresStore) UpdatePayment(ctx context.Context, id string, fromStatus
 		if errors.Is(err, pgx.ErrNoRows) {
 			return payment.Payment{}, fmt.Errorf("%w: %s -> %s for payment %s", errInvalidStateTransition, fromStatus, toStatus, id)
 		}
+		slog.Error("failed to update payment", "payment_id", id, "error", err)
 		return payment.Payment{}, err
 	}
 
@@ -102,6 +105,7 @@ func (s *PostgresStore) UpdateProviderRef(ctx context.Context, id, providerRef s
 
 	tag, err := s.db.Exec(ctx, query, providerRef, id, payment.StatusSuccess)
 	if err != nil {
+		slog.Error("failed to update provider ref", "payment_id", id, "error", err)
 		return err
 	}
 	if tag.RowsAffected() == 0 {
@@ -156,10 +160,12 @@ func (s *PostgresStore) CreatePayment(ctx context.Context, params payment.Create
 		if errors.As(err, &pgError) && pgError.Code == "23505" {
 			existingPayment, lookupErr := s.GetPaymentByIdempotencyKey(ctx, params.IdempotencyKey)
 			if lookupErr != nil {
+				slog.Error("failed to lookup existing payment by idempotency key", "idempotency_key", params.IdempotencyKey, "error", lookupErr)
 				return nil, false, lookupErr
 			}
 			return &existingPayment, false, nil
 		}
+		slog.Error("failed to create payment", "idempotency_key", params.IdempotencyKey, "error", err)
 		return nil, false, err
 	}
 

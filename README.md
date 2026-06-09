@@ -20,8 +20,8 @@ An asynchronous payment pipeline in Go backed by PostgreSQL and Redis.
 
 ```mermaid
 flowchart TD
-    Client -->|POST /payments| API["API Server"]
-    Client -->|"GET /payments/:id"| API
+    Client -->|POST /v1/payments| API["API Server"]
+    Client -->|"GET /v1/payments/:id"| API
 
     API -->|insert payment| PG[("Postgres")]
     API -->|read payment| PG
@@ -102,11 +102,11 @@ go run ./cmd/okane
 
 ## API
 
-### `POST /payments`
+### `POST /v1/payments`
 Enqueues a payment. Requires validation: `amount > 0` and a non-empty `idempotency_key`.
 
 ```bash
-curl -i -X POST http://localhost:8080/payments \
+curl -i -X POST http://localhost:8080/v1/payments \
   -H "Content-Type: application/json" \
   -d '{"amount": 440, "idempotency_key": "demo-key-1"}'
 ```
@@ -128,11 +128,11 @@ curl -i -X POST http://localhost:8080/payments \
 }
 ```
 
-### `GET /payments/{id}`
+### `GET /v1/payments/{id}`
 Retrieves payment status.
 
 ```bash
-curl -i http://localhost:8080/payments/7d6adb1e-6627-44ed-a544-0e75d21ef09d
+curl -i http://localhost:8080/v1/payments/7d6adb1e-6627-44ed-a544-0e75d21ef09d
 ```
 
 **Response (`200 OK`)**
@@ -151,11 +151,11 @@ curl -i http://localhost:8080/payments/7d6adb1e-6627-44ed-a544-0e75d21ef09d
 }
 ```
 
-### `GET /health`
+### `GET /v1/health`
 API health-check.
 
 ```bash
-curl -i http://localhost:8080/health
+curl -i http://localhost:8080/v1/health
 ```
 
 **Response (`200 OK`)**

@@ -28,7 +28,9 @@ func NewServer(redisOpt asynq.RedisClientOpt, processor PaymentProcessor, concur
 	srv := asynq.NewServer(redisOpt, asynq.Config{
 		Concurrency: concurrency,
 		Queues: map[string]int{
-			"payments": 1,
+			"critical": 6,
+			"default":  3,
+			"low":      1,
 		},
 	})
 

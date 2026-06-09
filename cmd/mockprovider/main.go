@@ -40,7 +40,9 @@ func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	_ = godotenv.Load()
+	if err := godotenv.Load(); err != nil {
+		slog.Warn("could not load .env file", "error", err)
+	}
 
 	port := os.Getenv("MOCK_PROVIDER_PORT")
 	if port == "" {

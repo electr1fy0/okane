@@ -10,6 +10,7 @@ import (
 
 	"github.com/electr1fy0/okane/internal/payment"
 	"github.com/go-playground/validator/v10"
+	"github.com/hibiken/asynq"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -34,6 +35,7 @@ type PaymentService interface {
 	CreatePayment(ctx context.Context, params payment.CreatePaymentParams) (*payment.Payment, bool, error)
 	GetPaymentByID(ctx context.Context, id string) (payment.Payment, error)
 	EnqueuePayment(ctx context.Context, paymentID string) error
+	RetryFailedPayment(ctx context.Context, paymentID string) error
 }
 
 type APIHandler struct {
@@ -167,5 +169,32 @@ func (h *APIHandler) GetPaymentID(w http.ResponseWriter, r *http.Request) error 
 	writeJSON(w, GetPaymentResponse{
 		Payment: p,
 	}, http.StatusOK)
+	return nil
+}
+
+func (h *APIHandler) RetryPayment(w http.ResponseWriter, r *http.Request) error {
+	id := r.PathValue("id")
+	if id == "" {
+		return &HttpError{
+			status:  http.StatusBadRequest,
+			message: "missing payment id",
+		}
+	}
+
+	err := h.svc.RetryFailedPayment(r.Context(), id)
+	if err != nil {
+		if errors.Is(err, asynq.ErrTaskNotFound) {
+			return &HttpError{
+				status:  http.StatusNotFound,
+				message: "payment task not found in archived or retry queue",
+			}
+		}
+		return &HttpError{
+			status:  http.StatusInternalServerError,
+			message: "failed to retry payment: " + err.Error(),
+		}
+	}
+
+	writeJSON(w, map[string]string{"status": "queued"}, http.StatusOK)
 	return nil
 }

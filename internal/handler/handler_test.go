@@ -10,6 +10,7 @@ import (
 
 	"github.com/electr1fy0/okane/internal/payment"
 	"github.com/google/uuid"
+	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -117,4 +118,44 @@ func TestGetPaymentByIDReturnsPayment(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Equal(t, p.ID, resp.Payment.ID)
+}
+
+func TestRetryPaymentSuccess(t *testing.T) {
+	p := testPayment()
+	mockSvc := NewMockPaymentService(t)
+
+	mockSvc.On("RetryFailedPayment", mock.Anything, p.ID.String()).Return(nil)
+
+	handler := &APIHandler{svc: mockSvc}
+
+	req := httptest.NewRequest(http.MethodPost, "/payments/"+p.ID.String()+"/retry", nil)
+	req.SetPathValue("id", p.ID.String())
+	rr := httptest.NewRecorder()
+
+	Handle(handler.RetryPayment)(rr, req)
+
+	assert.Equal(t, http.StatusOK, rr.Code, "body=%s", rr.Body.String())
+
+	var resp map[string]string
+	err := json.Unmarshal(rr.Body.Bytes(), &resp)
+	require.NoError(t, err)
+
+	assert.Equal(t, "queued", resp["status"])
+}
+
+func TestRetryPaymentNotFound(t *testing.T) {
+	p := testPayment()
+	mockSvc := NewMockPaymentService(t)
+
+	mockSvc.On("RetryFailedPayment", mock.Anything, p.ID.String()).Return(asynq.ErrTaskNotFound)
+
+	handler := &APIHandler{svc: mockSvc}
+
+	req := httptest.NewRequest(http.MethodPost, "/payments/"+p.ID.String()+"/retry", nil)
+	req.SetPathValue("id", p.ID.String())
+	rr := httptest.NewRecorder()
+
+	Handle(handler.RetryPayment)(rr, req)
+
+	assert.Equal(t, http.StatusNotFound, rr.Code, "body=%s", rr.Body.String())
 }

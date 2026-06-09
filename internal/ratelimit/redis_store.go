@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strconv"
 	"time"
 
@@ -40,11 +41,13 @@ func (s *RedisLimiterStore) Allow(ctx context.Context, key string, limit int, wi
 
 	_, err := pipe.Exec(ctx)
 	if err != nil {
+		slog.Error("failed to execute rate limit pipeline", "error", err)
 		return false, fmt.Errorf("failed to execute sliding window pipeline: %w", err)
 	}
 
 	count, err := zCard.Result()
 	if err != nil {
+		slog.Error("failed to read rate limit window capacity", "error", err)
 		return false, fmt.Errorf("failed to read window capacity: %w", err)
 	}
 
