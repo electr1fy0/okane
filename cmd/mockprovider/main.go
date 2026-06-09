@@ -2,11 +2,12 @@ package main
 
 import (
 	"encoding/json"
-	"fmt"
+	"io"
 	"log/slog"
 	"math/rand"
 	"net/http"
 	"os"
+	"path/filepath"
 
 	"github.com/google/uuid"
 	"github.com/joho/godotenv"
@@ -33,16 +34,39 @@ func (m *MockProvider) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (m *MockProvider) Health(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "don't worry about me, mate")
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	_ = json.NewEncoder(w).Encode(map[string]string{"message": "don't worry about me, mate"})
 }
 
 func main() {
-	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
-	slog.SetDefault(logger)
-
 	if err := godotenv.Load(); err != nil {
 		slog.Warn("could not load .env file", "error", err)
 	}
+
+	logLevel := slog.LevelInfo
+	if os.Getenv("LOG_LEVEL") == "DEBUG" {
+		logLevel = slog.LevelDebug
+	}
+
+	var logWriter io.Writer = os.Stdout
+	logFilePath := os.Getenv("LOG_FILE_PATH")
+	if logFilePath != "" {
+		if err := os.MkdirAll(filepath.Dir(logFilePath), 0755); err == nil {
+			if file, err := os.OpenFile(logFilePath, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666); err == nil {
+				logWriter = io.MultiWriter(os.Stdout, file)
+			} else {
+				slog.Error("failed to open log file", "path", logFilePath, "error", err)
+			}
+		} else {
+			slog.Error("failed to create log directory", "path", filepath.Dir(logFilePath), "error", err)
+		}
+	}
+
+	logger := slog.New(slog.NewJSONHandler(logWriter, &slog.HandlerOptions{
+		Level: logLevel,
+	}))
+	slog.SetDefault(logger)
 
 	port := os.Getenv("MOCK_PROVIDER_PORT")
 	if port == "" {

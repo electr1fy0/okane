@@ -18,7 +18,12 @@ func TestMockProvider_Health(t *testing.T) {
 	m.Health(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "don't worry about me, mate", w.Body.String())
+	assert.Equal(t, "application/json", w.Header().Get("Content-Type"))
+
+	var body map[string]string
+	err := json.NewDecoder(w.Body).Decode(&body)
+	require.NoError(t, err)
+	assert.Equal(t, "don't worry about me, mate", body["message"])
 }
 
 func TestMockProvider_ServeHTTP(t *testing.T) {

@@ -37,17 +37,34 @@ services:
         condition: service_healthy
       provider:
         condition: service_healthy
+    volumes:
+      - ./logs:/app/logs
     environment:
       PROVIDER_BASE_URL: http://provider:3000
       DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
       REDIS_ADDR: redis:6379
+      LOG_LEVEL: DEBUG
+      LOG_FILE_PATH: /app/logs/okane.log
 
   provider:
     build:
       context: .
       dockerfile: cmd/mockprovider/Dockerfile
+    volumes:
+      - ./logs:/app/logs
+    environment:
+      LOG_LEVEL: DEBUG
+      LOG_FILE_PATH: /app/logs/provider.log
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+  dozzle:
+    image: amir20/dozzle:latest
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - dozzle_data:/data
+    ports:
+      - 8282:8080
 
 volumes:
   db_data:
+  dozzle_data:

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"net/http"
 
@@ -62,7 +61,7 @@ func (h *HttpError) Error() string {
 }
 
 func (h *APIHandler) Health(w http.ResponseWriter, r *http.Request) {
-	fmt.Fprintf(w, "don't worry about me, mate")
+	writeJSON(w, map[string]string{"message": "don't worry about me, mate"}, http.StatusOK)
 }
 
 func HttpErrorResponse(w http.ResponseWriter, err error) {

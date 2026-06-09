@@ -1,0 +1,118 @@
+{
+  "meta": {
+    "version": "1.1.0",
+    "exportedAt": "2026-06-09T17:56:49.754Z",
+    "exportedUsing": "Requestly API Client"
+  },
+  "records": [
+    {
+      "id": "ee0956f7-74db-439d-95aa-0da33c2f79de",
+      "name": "Health",
+      "type": "api",
+      "parentId": "b865218b-0abe-45a9-86db-02d00e443008",
+      "deleted": false,
+      "data": {
+        "type": "http",
+        "request": {
+          "url": "http://localhost:8080/v1/health",
+          "method": "GET",
+          "headers": [],
+          "queryParams": [],
+          "pathVariables": [],
+          "body": {
+            "contentType": "none"
+          },
+          "contentType": "none"
+        },
+        "auth": {
+          "type": "inherit"
+        }
+      },
+      "rank": "a0"
+    },
+    {
+      "id": "9e1b84ff-f83c-4c6d-867a-67dd213fe4f2",
+      "name": "Get Payment By ID",
+      "type": "api",
+      "parentId": "b865218b-0abe-45a9-86db-02d00e443008",
+      "deleted": false,
+      "data": {
+        "type": "http",
+        "request": {
+          "url": "http://localhost:8080/v1/payments/:id",
+          "method": "GET",
+          "headers": [],
+          "queryParams": [
+            {
+              "id": 1781021166974,
+              "key": "",
+              "value": "d73a3ac9-4029-4b5d-9c90-fd6044be17e9",
+              "isEnabled": false,
+              "description": ""
+            }
+          ],
+          "pathVariables": [
+            {
+              "key": "id",
+              "value": "d73a3ac9-4029-4b5d-9c90-fd6044be17e9",
+              "dataType": "string"
+            }
+          ],
+          "body": {
+            "contentType": "none"
+          },
+          "contentType": "none"
+        },
+        "auth": {
+          "type": "inherit"
+        }
+      },
+      "rank": "a2"
+    },
+    {
+      "id": "530b29f5-8036-4f6d-b20e-cdc68d2280ec",
+      "name": "Create Payment",
+      "type": "api",
+      "parentId": "b865218b-0abe-45a9-86db-02d00e443008",
+      "deleted": false,
+      "data": {
+        "type": "http",
+        "request": {
+          "url": "http://localhost:8080/v1/payments",
+          "method": "POST",
+          "headers": [],
+          "queryParams": [],
+          "pathVariables": [],
+          "body": {
+            "contentType": "raw",
+            "raw": "{\n  amount: 500,\n  idempotency_key: 'pika_pika',\n}\n",
+            "rawContentType": "application/json",
+            "formData": [],
+            "formUrlEncoded": []
+          },
+          "contentType": "none"
+        },
+        "auth": {
+          "type": "inherit"
+        }
+      },
+      "rank": "a1"
+    },
+    {
+      "id": "b865218b-0abe-45a9-86db-02d00e443008",
+      "name": "okane",
+      "description": "Payment API",
+      "type": "collection",
+      "parentId": null,
+      "deleted": false,
+      "data": {
+        "auth": {
+          "type": "inherit"
+        }
+      },
+      "rank": "a0"
+    }
+  ],
+  "environments": [],
+  "packages": []
+}

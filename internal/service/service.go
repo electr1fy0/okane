@@ -39,11 +39,13 @@ func New(paymentStore store.Store, providerClient *ProviderClient, ac *asynq.Cli
 }
 
 func (s *Service) EnqueuePayment(ctx context.Context, paymentID string) error {
+	slog.Debug("EnqueuePayment called", "payment_id", paymentID)
 	p, err := s.store.GetPaymentByID(ctx, paymentID)
 	if err != nil {
 		slog.Error("failed to load payment for enqueueing", "payment_id", paymentID, "error", err)
 		return err
 	}
+	slog.Debug("loaded payment details for enqueueing", "payment_id", paymentID, "amount", p.Amount, "status", p.Status)
 
 	payload, err := json.Marshal(paymentTask{PaymentID: paymentID})
 	if err != nil {
@@ -57,6 +59,7 @@ func (s *Service) EnqueuePayment(ctx context.Context, paymentID string) error {
 	} else if p.Amount < 1000 {
 		queue = "low"
 	}
+	slog.Debug("determined destination queue", "payment_id", paymentID, "amount", p.Amount, "queue", queue)
 
 	task := asynq.NewTask("payment:process", payload)
 	_, err = s.asynqClient.Enqueue(task,
@@ -67,19 +70,30 @@ func (s *Service) EnqueuePayment(ctx context.Context, paymentID string) error {
 	)
 	if err != nil {
 		slog.Error("failed to enqueue payment task", "payment_id", paymentID, "queue", queue, "error", err)
+	} else {
+		slog.Debug("successfully enqueued task to Asynq", "payment_id", paymentID, "queue", queue)
 	}
 	return err
 }
 
 func (s *Service) CreatePayment(ctx context.Context, params payment.CreatePaymentParams) (*payment.Payment, bool, error) {
-	return s.store.CreatePayment(ctx, params)
+	slog.Debug("CreatePayment called in service", "amount", params.Amount, "idempotency_key", params.IdempotencyKey)
+	p, created, err := s.store.CreatePayment(ctx, params)
+	if err != nil {
+		slog.Error("failed to create payment in store", "error", err)
+		return nil, false, err
+	}
+	slog.Debug("CreatePayment store result", "payment_id", p.ID, "created", created, "status", p.Status)
+	return p, created, nil
 }
 
 func (s *Service) GetPaymentByID(ctx context.Context, id string) (payment.Payment, error) {
+	slog.Debug("GetPaymentByID called", "payment_id", id)
 	return s.store.GetPaymentByID(ctx, id)
 }
 
 func (c *ProviderClient) executePayment(ctx context.Context) (string, int, error) {
+	slog.Debug("executing payment call to provider", "url", c.baseURL)
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL, nil)
 	if err != nil {
 		slog.Error("failed to create provider request", "error", err)
@@ -96,6 +110,7 @@ func (c *ProviderClient) executePayment(ctx context.Context) (string, int, error
 		ProviderRef string `json:"provider_ref"`
 	}
 	_ = json.NewDecoder(resp.Body).Decode(&respStruct)
+	slog.Debug("received response from provider", "status_code", resp.StatusCode, "provider_ref", respStruct.ProviderRef)
 
 	return respStruct.ProviderRef, resp.StatusCode, err
 }
@@ -108,23 +123,28 @@ func (s *Service) ProcessPayment(ctx context.Context, paymentID string) error {
 		slog.Error("failed to load payment", "payment_id", paymentID, "error", err)
 		return err
 	}
+	slog.Debug("loaded payment details before updating processing status", "payment_id", paymentID, "status", p.Status)
 
 	switch p.Status {
 	case payment.StatusSuccess, payment.StatusFailedFinal:
 		slog.Info("payment already terminal, skipping", "payment_id", paymentID, "status", p.Status)
 		return nil
 	case payment.StatusPending:
+		slog.Debug("transitioning status from pending to processing", "payment_id", paymentID)
 		p, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusPending, payment.StatusProcessing, "", false)
 		if err != nil {
 			slog.Error("failed to move payment to processing", "payment_id", paymentID, "error", err)
 			return err
 		}
+		slog.Debug("payment transitioned to processing in store", "payment_id", paymentID)
 	case payment.StatusFailedRetryable:
+		slog.Debug("transitioning status from failed_retryable to processing", "payment_id", paymentID)
 		p, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusFailedRetryable, payment.StatusProcessing, "", false)
 		if err != nil {
 			slog.Error("failed to resume retryable payment", "payment_id", paymentID, "error", err)
 			return err
 		}
+		slog.Debug("payment transitioned to processing in store", "payment_id", paymentID)
 	default:
 		slog.Warn("skipping payment with non-processable status", "payment_id", paymentID, "status", p.Status)
 		return nil
@@ -134,17 +154,20 @@ func (s *Service) ProcessPayment(ctx context.Context, paymentID string) error {
 	providerRef, status, err := s.providerClient.executePayment(ctx)
 	if err != nil {
 		slog.Error("failed to request payment provider", "payment_id", paymentID, "error", err)
+		slog.Debug("recording connection/provider request failure in store", "payment_id", paymentID, "error", err.Error())
 		_ = s.store.RecordProcessingFailure(ctx, paymentID, err.Error(), true)
 		return err
 	}
 
 	switch status {
 	case http.StatusOK:
+		slog.Debug("updating Postgres payment status to success", "payment_id", paymentID)
 		_, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusProcessing, payment.StatusSuccess, "", true)
 		if err != nil {
 			slog.Error("failed to update payment success state", "payment_id", paymentID, "error", err)
 			return err
 		}
+		slog.Debug("updating provider ref in Postgres", "payment_id", paymentID, "provider_ref", providerRef)
 		err = s.store.UpdateProviderRef(ctx, paymentID, providerRef)
 		if err != nil {
 			slog.Error("failed to update provider ref", "payment_id", paymentID, "error", err)
@@ -155,11 +178,13 @@ func (s *Service) ProcessPayment(ctx context.Context, paymentID string) error {
 
 	case http.StatusServiceUnavailable:
 		slog.Warn("provider unavailable", "payment_id", paymentID)
+		slog.Debug("recording 503 service unavailable failure in Postgres", "payment_id", paymentID)
 		err = s.store.RecordProcessingFailure(ctx, paymentID, "service unavailable", true)
 		if err != nil {
 			slog.Error("failed to record processing failure", "payment_id", paymentID, "error", err)
 			return err
 		}
+		slog.Debug("updating status from processing to failed_retryable", "payment_id", paymentID)
 		if _, err := s.store.UpdatePayment(ctx, paymentID, payment.StatusProcessing, payment.StatusFailedRetryable, "service unavailable", false); err != nil {
 			slog.Error("failed to update payment to retryable", "payment_id", paymentID, "error", err)
 		}
@@ -167,6 +192,7 @@ func (s *Service) ProcessPayment(ctx context.Context, paymentID string) error {
 
 	case http.StatusUnprocessableEntity:
 		slog.Warn("payment rejected by provider", "payment_id", paymentID)
+		slog.Debug("updating status from processing to failed_final (terminal)", "payment_id", paymentID)
 		_, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusProcessing, payment.StatusFailedFinal, "unprocessable payment", false)
 		if err != nil {
 			slog.Error("failed to update failed payment state", "payment_id", paymentID, "error", err)
@@ -176,11 +202,13 @@ func (s *Service) ProcessPayment(ctx context.Context, paymentID string) error {
 
 	default:
 		slog.Warn("provider returned unexpected status", "payment_id", paymentID, "status_code", status)
+		slog.Debug("recording unexpected status failure in Postgres", "payment_id", paymentID, "status_code", status)
 		err = s.store.RecordProcessingFailure(ctx, paymentID, fmt.Sprintf("provider returned status %d", status), true)
 		if err != nil {
 			slog.Error("failed to record processing failure", "payment_id", paymentID, "error", err)
 			return err
 		}
+		slog.Debug("updating status from processing to failed_retryable due to unexpected status", "payment_id", paymentID)
 		if _, err := s.store.UpdatePayment(ctx, paymentID, payment.StatusProcessing, payment.StatusFailedRetryable, fmt.Sprintf("provider returned status %d", status), false); err != nil {
 			slog.Error("failed to update payment to retryable", "payment_id", paymentID, "error", err)
 		}
@@ -189,8 +217,10 @@ func (s *Service) ProcessPayment(ctx context.Context, paymentID string) error {
 }
 
 func (s *Service) RetryFailedPayment(ctx context.Context, paymentID string) error {
+	slog.Debug("manual RetryFailedPayment requested", "payment_id", paymentID)
 	p, err := s.store.GetPaymentByID(ctx, paymentID)
 	if err != nil {
+		slog.Error("failed to load payment details for manual retry", "payment_id", paymentID, "error", err)
 		return err
 	}
 
@@ -200,15 +230,25 @@ func (s *Service) RetryFailedPayment(ctx context.Context, paymentID string) erro
 	} else if p.Amount < 1000 {
 		queue = "low"
 	}
+	slog.Debug("determined queue for manual retry", "payment_id", paymentID, "queue", queue)
 
+	slog.Debug("triggering task replay via Asynq Inspector", "payment_id", paymentID, "queue", queue)
 	err = s.asynqInspector.RunTask(queue, paymentID)
 	if err != nil {
 		if errors.Is(err, asynq.ErrTaskNotFound) {
+			slog.Error("failed manual retry: task not found in queues", "payment_id", paymentID, "queue", queue)
 			return fmt.Errorf("task not found in retryable/archived queues: %w", err)
 		}
+		slog.Error("failed manual retry: run task error", "payment_id", paymentID, "queue", queue, "error", err)
 		return fmt.Errorf("failed to run task: %w", err)
 	}
 
+	slog.Debug("updating status from failed_final to pending in store for manual retry", "payment_id", paymentID)
 	_, err = s.store.UpdatePayment(ctx, paymentID, payment.StatusFailedFinal, payment.StatusPending, "manual retry initiated", false)
+	if err != nil {
+		slog.Error("failed to update payment status back to pending after manual retry", "payment_id", paymentID, "error", err)
+	} else {
+		slog.Debug("successfully reset payment status to pending in store", "payment_id", paymentID)
+	}
 	return err
 }

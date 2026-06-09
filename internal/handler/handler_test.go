@@ -159,3 +159,23 @@ func TestRetryPaymentNotFound(t *testing.T) {
 
 	assert.Equal(t, http.StatusNotFound, rr.Code, "body=%s", rr.Body.String())
 }
+
+func TestLoggingMiddleware(t *testing.T) {
+	called := false
+	nextHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusTeapot)
+		_, _ = w.Write([]byte("short response"))
+	})
+
+	loggedHandler := LoggingMiddleware(nextHandler)
+
+	req := httptest.NewRequest(http.MethodGet, "/some-route", nil)
+	rr := httptest.NewRecorder()
+
+	loggedHandler.ServeHTTP(rr, req)
+
+	assert.True(t, called)
+	assert.Equal(t, http.StatusTeapot, rr.Code)
+	assert.Equal(t, "short response", rr.Body.String())
+}

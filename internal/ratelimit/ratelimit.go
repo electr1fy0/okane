@@ -40,11 +40,13 @@ func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 		}
 
 		if !allowed {
+			slog.Debug("rate limit exceeded", "client_ip", clientIP, "limit", rl.limit, "window", rl.window)
 			w.Header().Set("Retry-After", rl.window.String())
 			http.Error(w, "Too Many Requests", http.StatusTooManyRequests)
 			return
 		}
 
+		slog.Debug("rate limit allowed", "client_ip", clientIP)
 		next.ServeHTTP(w, r)
 	})
 }
