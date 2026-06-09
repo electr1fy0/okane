@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"log/slog"
 	"net"
 	"net/http"
@@ -28,62 +27,89 @@ const (
 	serverWriteTimeout    = 10 * time.Second
 	serverIdleTimeout     = 60 * time.Second
 	serverShutdownTimeout = 30 * time.Second
-	workerConcurrency     = 5
+	workerCnt             = 5
 )
 
 func mustGetEnv(key string) string {
 	value := os.Getenv(key)
 	if value == "" {
-		log.Fatalf("missing required env var %s", key)
+		slog.Error("missing required env var", "key", key)
+		os.Exit(1)
 	}
 	return value
+}
+
+func setupRouter(h *handler.APIHandler) *http.ServeMux {
+	r := http.NewServeMux()
+	r.HandleFunc("POST /v1/payments", handler.Handle(h.CreatePayment))
+	r.HandleFunc("GET /v1/payments/{id}", handler.Handle(h.GetPaymentID))
+	r.HandleFunc("POST /v1/payments/{id}/retry", handler.Handle(h.RetryPayment))
+	r.HandleFunc("GET /v1/health", h.Health)
+
+	return r
+}
+
+type envConfig struct {
+	providerBaseURL string
+	databaseURL     string
+	redisAddr       string
+	appPort         string
+}
+
+func (e *envConfig) load() {
+	if err := godotenv.Load(); err != nil {
+		slog.Warn("could not load .env file", "error", err)
+	}
+	e.providerBaseURL = mustGetEnv("PROVIDER_BASE_URL")
+	e.databaseURL = mustGetEnv("DATABASE_URL")
+	e.redisAddr = mustGetEnv("REDIS_ADDR")
+
+	e.appPort = os.Getenv("PORT")
+	if e.appPort == "" {
+		e.appPort = "8080"
+	}
 }
 
 func main() {
 	logger := slog.New(slog.NewTextHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
 
-	_ = godotenv.Load()
+	env := envConfig{}
+	env.load()
 
 	sigCtx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	addr := ":" + port
-
-	providerBaseURL := mustGetEnv("PROVIDER_BASE_URL")
-	databaseURL := mustGetEnv("DATABASE_URL")
-	redisAddr := mustGetEnv("REDIS_ADDR")
-
-	providerClient := service.NewProviderClient(providerBaseURL, &http.Client{})
-
-	dbPool, err := pgxpool.New(sigCtx, databaseURL)
+	dbPool, err := pgxpool.New(sigCtx, env.databaseURL)
 	if err != nil {
-		log.Fatalln("failed to connect to db", err)
+		slog.Error("failed to connect to database", "error", err)
+		os.Exit(1)
 	}
-
-	redisOpt := asynq.RedisClientOpt{Addr: redisAddr}
-
-	ac := asynq.NewClient(redisOpt)
 
 	paymentStore := store.New(dbPool)
-	svc := service.New(paymentStore, providerClient, ac)
+
+	// mockprovider
+	providerClient := service.NewProviderClient(env.providerBaseURL, &http.Client{})
+
+	// asynq client
+	redisOpt := asynq.RedisClientOpt{Addr: env.redisAddr}
+	ac := asynq.NewClient(redisOpt)
+
+	// service
+	svc := service.New(paymentStore, providerClient, ac, redisOpt)
 	h := handler.New(svc)
 
-	workerSrv := worker.NewServer(redisOpt, svc, workerConcurrency)
+	// asynq server
+	workerSrv := worker.NewServer(redisOpt, svc, workerCnt)
 
-	r := http.NewServeMux()
-	r.HandleFunc("POST /payments", handler.Handle(h.CreatePayment))
-	r.HandleFunc("GET /payments/{id}", handler.Handle(h.GetPaymentID))
-	r.HandleFunc("GET /health", h.Health)
-
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
+	// rate limiter
+	rdb := redis.NewClient(&redis.Options{Addr: env.redisAddr})
 	limiterStore := ratelimit.NewRedisLimiterStore(rdb)
 	rateLimiter := ratelimit.NewRateLimiter(limiterStore, 100, 1*time.Minute)
 
+	// app server
+	r := setupRouter(h)
+	addr := ":" + env.appPort
 	server := &http.Server{
 		Addr:    addr,
 		Handler: rateLimiter.Middleware(r),
@@ -98,16 +124,18 @@ func main() {
 	g, _ := errgroup.WithContext(sigCtx)
 
 	g.Go(func() error {
+		slog.Info("starting worker", "concurrency", workerCnt)
+		return workerSrv.Run()
+	})
+
+	g.Go(func() error {
 		slog.Info("starting server", "addr", addr)
 		if err := server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			return err
 		}
 		return nil
 	})
-	g.Go(func() error {
-		slog.Info("starting worker", "concurrency", workerConcurrency)
-		return workerSrv.Run()
-	})
+
 	g.Go(func() error {
 		<-sigCtx.Done()
 		ac.Close()
