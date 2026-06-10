@@ -95,7 +95,7 @@ func BenchmarkPostgresStore_CreatePayment(b *testing.B) {
 	ctx := context.Background()
 
 	b.ResetTimer()
-	for i := range b.Loop() {
+	for i := 0; i < b.N; i++ {
 		idempotencyKey := fmt.Sprintf("bench-key-%d-%d", b.N, i)
 		params := payment.CreatePaymentParams{
 			Amount:         500,
