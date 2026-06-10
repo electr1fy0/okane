@@ -58,3 +58,15 @@ func TestHandlePayment_BadPayload(t *testing.T) {
 	require.Error(t, err)
 	assert.False(t, proc.called)
 }
+
+func BenchmarkHandlePayment(b *testing.B) {
+	proc := &mockProcessor{}
+	handler := HandlePayment(proc)
+	task := makeTask("pay-benchmark-id")
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for b.Loop() {
+		_ = handler(ctx, task)
+	}
+}

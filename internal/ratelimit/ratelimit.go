@@ -3,6 +3,7 @@ package ratelimit
 import (
 	"context"
 	"log/slog"
+	"net"
 	"net/http"
 	"time"
 )
@@ -27,7 +28,10 @@ func NewRateLimiter(store LimiterStore, limit int, window time.Duration) *RateLi
 
 func (rl *RateLimiter) Middleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		clientIP := r.RemoteAddr
+		clientIP, _, err := net.SplitHostPort(r.RemoteAddr)
+		if err != nil {
+			clientIP = r.RemoteAddr
+		}
 
 		allowed, err := rl.store.Allow(r.Context(), clientIP, rl.limit, rl.window)
 

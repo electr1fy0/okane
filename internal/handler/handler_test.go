@@ -179,3 +179,24 @@ func TestLoggingMiddleware(t *testing.T) {
 	assert.Equal(t, http.StatusTeapot, rr.Code)
 	assert.Equal(t, "short response", rr.Body.String())
 }
+
+func BenchmarkCreatePaymentHandler(b *testing.B) {
+	p := testPayment()
+	mockSvc := NewMockPaymentService(b)
+
+	mockSvc.On("CreatePayment", mock.Anything, mock.Anything).Return(&p, true, nil)
+	mockSvc.On("EnqueuePayment", mock.Anything, mock.Anything).Return(nil)
+
+	h := &APIHandler{svc: mockSvc}
+	handlerFunc := Handle(h.CreatePayment)
+
+	reqBody := `{"amount":440,"idempotency_key":"demo-key-1"}`
+	b.ResetTimer()
+	for b.Loop() {
+		req := httptest.NewRequest(http.MethodPost, "/payments", strings.NewReader(reqBody))
+		req.Header.Set("Content-Type", "application/json")
+		rr := httptest.NewRecorder()
+
+		handlerFunc(rr, req)
+	}
+}

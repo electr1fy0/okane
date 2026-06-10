@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"testing"
 
@@ -11,7 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func setupTestDB(t *testing.T) (*pgxpool.Pool, func()) {
+func setupTestDB(t testing.TB) (*pgxpool.Pool, func()) {
 	ctx := context.Background()
 
 	dbURL := os.Getenv("DATABASE_URL")
@@ -84,4 +85,26 @@ func TestPostgresStore_GetPaymentByID(t *testing.T) {
 
 	assert.Equal(t, p.ID, found.ID)
 	assert.Equal(t, int64(500), found.Amount)
+}
+
+func BenchmarkPostgresStore_CreatePayment(b *testing.B) {
+	pool, teardown := setupTestDB(b)
+	defer teardown()
+
+	s := New(pool)
+	ctx := context.Background()
+
+	b.ResetTimer()
+	for i := range b.Loop() {
+		idempotencyKey := fmt.Sprintf("bench-key-%d-%d", b.N, i)
+		params := payment.CreatePaymentParams{
+			Amount:         500,
+			Status:         payment.StatusPending,
+			IdempotencyKey: idempotencyKey,
+		}
+		_, _, err := s.CreatePayment(ctx, params)
+		if err != nil {
+			b.Fatalf("failed to create payment: %v", err)
+		}
+	}
 }

@@ -72,3 +72,30 @@ func TestRedisLimiterStore(t *testing.T) {
 		assert.True(t, allowed)
 	})
 }
+
+func BenchmarkRedisLimiterStore_Allow(b *testing.B) {
+	mr, err := miniredis.Run()
+	if err != nil {
+		b.Fatalf("failed to start miniredis: %v", err)
+	}
+	defer mr.Close()
+
+	rdb := redis.NewClient(&redis.Options{
+		Addr: mr.Addr(),
+	})
+	defer rdb.Close()
+
+	store := NewRedisLimiterStore(rdb)
+	ctx := context.Background()
+	key := "benchmark-key"
+	limit := 1000000
+	window := 1 * time.Minute
+
+	b.ResetTimer()
+	for b.Loop() {
+		_, err := store.Allow(ctx, key, limit, window)
+		if err != nil {
+			b.Fatalf("Allow failed: %v", err)
+		}
+	}
+}
