@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"time"
 
+	"crypto/tls"
+
 	"github.com/electr1fy0/okane/internal/handler"
 	"github.com/electr1fy0/okane/internal/ratelimit"
 	"github.com/electr1fy0/okane/internal/service"
@@ -35,6 +37,7 @@ const (
 type envConfig struct {
 	providerBaseURL string
 	databaseURL     string
+	redisURL        string
 	redisAddr       string
 	appPort         string
 	logLevel        string
@@ -63,7 +66,7 @@ func main() {
 	paymentStore := store.New(dbPool)
 	providerClient := service.NewProviderClient(env.providerBaseURL, &http.Client{})
 
-	redisOpt := asynq.RedisClientOpt{Addr: env.redisAddr}
+	redisOpt, rdb := initRedis(&env)
 	asynqClient := asynq.NewClient(redisOpt)
 	defer asynqClient.Close()
 
@@ -71,7 +74,8 @@ func main() {
 	apiHandler := handler.New(svc)
 
 	workerSrv := worker.NewServer(redisOpt, svc, workerCnt)
-	rateLimiter := initRateLimiter(env.redisAddr)
+	limiterStore := ratelimit.NewRedisLimiterStore(rdb)
+	rateLimiter := ratelimit.NewRateLimiter(limiterStore, 100, 1*time.Minute)
 
 	router := setupRouter(apiHandler)
 	addr := ":" + env.appPort
@@ -149,10 +153,27 @@ func initLogger(env *envConfig) io.Closer {
 	return logFile
 }
 
-func initRateLimiter(redisAddr string) *ratelimit.RateLimiter {
-	rdb := redis.NewClient(&redis.Options{Addr: redisAddr})
-	limiterStore := ratelimit.NewRedisLimiterStore(rdb)
-	return ratelimit.NewRateLimiter(limiterStore, 100, 1*time.Minute)
+func initRedis(env *envConfig) (asynq.RedisClientOpt, *redis.Client) {
+	if env.redisURL != "" {
+		opts, err := redis.ParseURL(env.redisURL)
+		if err != nil {
+			slog.Error("failed to parse REDIS_URL", "error", err)
+			os.Exit(1)
+		}
+		if opts.TLSConfig == nil {
+			opts.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+		}
+		return asynq.RedisClientOpt{
+				Addr:      opts.Addr,
+				Password:  opts.Password,
+				DB:        opts.DB,
+				TLSConfig: opts.TLSConfig,
+			},
+			redis.NewClient(opts)
+	}
+
+	rdb := redis.NewClient(&redis.Options{Addr: env.redisAddr})
+	return asynq.RedisClientOpt{Addr: env.redisAddr}, rdb
 }
 
 func setupRouter(h *handler.APIHandler) *http.ServeMux {
@@ -179,7 +200,12 @@ func (e *envConfig) load() {
 	}
 	e.providerBaseURL = mustGetEnv("PROVIDER_BASE_URL")
 	e.databaseURL = mustGetEnv("DATABASE_URL")
-	e.redisAddr = mustGetEnv("REDIS_ADDR")
+	e.redisURL = os.Getenv("REDIS_URL")
+	e.redisAddr = os.Getenv("REDIS_ADDR")
+	if e.redisURL == "" && e.redisAddr == "" {
+		slog.Error("missing required env var: set REDIS_URL (Upstash) or REDIS_ADDR (local)")
+		os.Exit(1)
+	}
 
 	e.appPort = os.Getenv("PORT")
 	if e.appPort == "" {
