@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/hibiken/asynq"
 	"github.com/stretchr/testify/assert"
@@ -69,4 +70,26 @@ func BenchmarkHandlePayment(b *testing.B) {
 	for b.Loop() {
 		_ = handler(ctx, task)
 	}
+}
+
+func TestPaymentRetryDelay(t *testing.T) {
+	// n = 0: baseDelay = 15s. Jitter is ±10% (±1.5s), so range is [13.5s, 16.5s]
+	delay0 := PaymentRetryDelay(0, nil, nil)
+	assert.GreaterOrEqual(t, delay0, 13*time.Second)
+	assert.LessOrEqual(t, delay0, 17*time.Second)
+
+	// n = 1: 15s * 2^1 = 30s. Jitter is ±10% (±3s), so range is [27s, 33s]
+	delay1 := PaymentRetryDelay(1, nil, nil)
+	assert.GreaterOrEqual(t, delay1, 27*time.Second)
+	assert.LessOrEqual(t, delay1, 33*time.Second)
+
+	// n = 2: 15s * 2^2 = 60s. Jitter is ±10% (±6s), so range is [54s, 66s]
+	delay2 := PaymentRetryDelay(2, nil, nil)
+	assert.GreaterOrEqual(t, delay2, 54*time.Second)
+	assert.LessOrEqual(t, delay2, 66*time.Second)
+
+	// n = 15: exponential exceeds maxDelay (8h). Capped at 8h. Jitter is ±10% (±48m), so range is [7.2h, 8.8h]
+	delay15 := PaymentRetryDelay(15, nil, nil)
+	assert.GreaterOrEqual(t, delay15, 7*time.Hour+10*time.Minute)
+	assert.LessOrEqual(t, delay15, 8*time.Hour+50*time.Minute)
 }

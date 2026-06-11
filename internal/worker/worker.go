@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"log/slog"
+	"math/rand"
+	"time"
 
 	"github.com/hibiken/asynq"
 )
@@ -21,6 +23,22 @@ type Server struct {
 	mux *asynq.ServeMux
 }
 
+func PaymentRetryDelay(n int, err error, task *asynq.Task) time.Duration {
+	baseDelay := 15 * time.Second
+	maxDelay := 8 * time.Hour
+
+	exponent := min(n, 20)
+	delay := min(maxDelay, baseDelay*time.Duration(1<<exponent))
+
+	jitterRange := delay / 10
+	if jitterRange > 0 {
+		randomJitter := rand.Int63n(int64(jitterRange * 2))
+		delay = (delay - jitterRange) + time.Duration(randomJitter)
+	}
+
+	return delay
+}
+
 func NewServer(redisOpt asynq.RedisClientOpt, processor PaymentProcessor, concurrency int) *Server {
 	mux := asynq.NewServeMux()
 	mux.HandleFunc("payment:process", HandlePayment(processor))
@@ -32,6 +50,7 @@ func NewServer(redisOpt asynq.RedisClientOpt, processor PaymentProcessor, concur
 			"default":  3,
 			"low":      1,
 		},
+		RetryDelayFunc: PaymentRetryDelay,
 	})
 
 	return &Server{srv: srv, mux: mux}

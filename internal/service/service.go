@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 
 	"github.com/electr1fy0/okane/internal/payment"
@@ -61,10 +63,17 @@ func (s *Service) EnqueuePayment(ctx context.Context, paymentID string) error {
 	}
 	slog.Debug("determined destination queue", "payment_id", paymentID, "amount", p.Amount, "queue", queue)
 
+	maxRetries := 8
+	if envVal := os.Getenv("MAX_RETRIES"); envVal != "" {
+		if val, err := strconv.Atoi(envVal); err == nil {
+			maxRetries = val
+		}
+	}
+
 	task := asynq.NewTask("payment:process", payload)
 	_, err = s.asynqClient.Enqueue(task,
 		asynq.Queue(queue),
-		asynq.MaxRetry(8),
+		asynq.MaxRetry(maxRetries),
 		asynq.Timeout(PaymentProcessingTimeout),
 		asynq.TaskID(paymentID),
 	)
